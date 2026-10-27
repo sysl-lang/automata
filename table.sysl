@@ -751,7 +751,8 @@ private gradient(out: Buf[u32], first: u32, last: u32)
     for i in 1..live
         out[usize(i)] = if live == 1 then first else mix(first, last, i - 1, live - 1)
 
-private mix(a: u32, b: u32, k: int, of: int) -> u32
+// The colour `k` steps of `of` from `a` toward `b`.
+mix(a: u32, b: u32, k: int, of: int) -> u32
     var out: u32 = 0
 
     for shift in [16, 8, 0]

@@ -21,15 +21,18 @@ enum Rule
     // A rule read from a Golly `.rule` file, as a table or a tree: up to 256 states, on a Moore or
     // von Neumann neighbourhood.
     Table(table: RuleTable)
+    // A Larger than Life rule: a count of live cells over a neighbourhood of any range up to 500.
+    LargerThanLife(rule: Ltl)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
-    // back to the same rule; Hensel notation in Golly's canonical spelling; or a table's name from
-    // its @RULE line.
+    // back to the same rule; Hensel or Larger than Life notation in Golly's canonical spelling; or a
+    // table's name from its @RULE line.
     notation(self) -> string
         self match
             LifeLike(b, s) -> s"B${counts(b)}/S${counts(s)}"
             Isotropic(h) -> h.notation()
             Table(t) -> t.name
+            LargerThanLife(l) -> l.notation()
 
     // Whether two rules make every cell the same: a B/S rule and the Hensel rule naming every
     // arrangement of the same counts are one rule.
@@ -40,6 +43,7 @@ enum Rule
             (LifeLike(b, s), Isotropic(h)) -> set_of(b) == h.birth && set_of(s) == h.survive
             (Isotropic(h), LifeLike(b, s)) -> set_of(b) == h.birth && set_of(s) == h.survive
             (Table(t1), Table(t2)) -> t1.name == t2.name && t1.states == t2.states && t1.next == t2.next && t1.tree == t2.tree
+            (LargerThanLife(l1), LargerThanLife(l2)) -> l1.same(l2)
             _ -> false
 end Rule
 
@@ -66,7 +70,12 @@ private counts(mask: u16) -> string
 // Golly reads them. A rule with no letters anywhere is a B/S rule; one with any is isotropic, even
 // when its letters add up to whole counts. Anything else is refused with a diagnostic pointing at the
 // byte that broke it.
+//
+// **A rule with a comma in it is Larger than Life** (`R5,C0,M1,S34..58,B34..45,NM`; see `ltl.sysl`),
+// since B/S notation never has one.
 parse_rule(text: string) -> Result[Rule, Diagnostic]
+    if text.contains(",") then return parse_ltl(text).map(l -> LargerThanLife(l))
+
     var s = scanner_of(text)
 
     s.skip_blanks()
@@ -93,6 +102,8 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
         if !s.accept(u8('/')) then return Err(error(s.here(), "expected `/` between the survival and birth counts"))
 
         birth = read_half(&s)?
+    elif first == u8('R') || first == u8('r')
+        return parse_ltl(text).map(l -> LargerThanLife(l))
     else
         return Err(error(Span(s.offset, s.offset + 1), "expected a rule such as B3/S23"))
 

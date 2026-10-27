@@ -142,7 +142,7 @@ impl View for Board
         // A rule table gives state 0 a colour of its own, which the whole grid is laid in first.
         m.rule match
             Table(t) -> c.fill(Rect(int(left), int(top), int(z * real(g.width)), int(z * real(g.height))), t.colours[0])
-            LifeLike(_, _) | Isotropic(_) -> ()
+            LifeLike(_, _) | Isotropic(_) | LargerThanLife(_) -> ()
 
         // Only the rows and columns that land inside the board are looked at.
         val y0 = max(0, int(((real(r.y) - top) / z).floor()))
@@ -199,10 +199,12 @@ impl View for Board
             m.oy = real(py) - real(r.y) - cy * next
     end paint
 
-// The colour a cell in `state` is drawn in: a table's own colours, or the one colour of a live cell.
+// The colour a cell in `state` is drawn in: a table's own colours, or the one colour of a live cell,
+// which a Larger than Life rule's decaying states fade from toward the board.
 private colour_of(rule: Rule, state: u8) -> u32 =
     rule match
         Table(t) -> t.colours[usize(state)]
+        LargerThanLife(l) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, l.states - 1)
         LifeLike(_, _) | Isotropic(_) -> LIVE
 
 // What a frame does on its own: run as many generations as the speed owes.
