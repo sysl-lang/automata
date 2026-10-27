@@ -7,7 +7,7 @@
 // `Grid.step`, and everything that only carries a rule around is unaffected — a Golly rule table is
 // the second such family.
 
-import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, scanner_of}
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, read_digits, scanner_of}
 
 enum Rule
     // A Life-like rule: a cell's next state depends on its own state and on how many of its eight
@@ -21,27 +21,66 @@ enum Rule
     // A rule read from a Golly `.rule` file, as a table or a tree: up to 256 states, on a Moore or
     // von Neumann neighbourhood.
     Table(table: RuleTable)
+    // A Generations rule: a Life-like or isotropic rule whose live cells, instead of dying, fade
+    // through dying states first.
+    Generations(rule: GenerationsRule)
+    // One of Wolfram's elementary rules: a line of cells, each becoming what its own state and its
+    // two neighbours' say. The grid holds the line's history, one generation to a row.
+    Wolfram(code: u8)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
-    // back to the same rule; Hensel notation in Golly's canonical spelling; or a table's name from
-    // its @RULE line.
+    // back to the same rule; Hensel notation in Golly's canonical spelling; Generations in Golly's
+    // survivals, births and states (`345/2/4`); `W` and the code; or a table's name from its @RULE
+    // line.
     notation(self) -> string
         self match
             LifeLike(b, s) -> s"B${counts(b)}/S${counts(s)}"
             Isotropic(h) -> h.notation()
             Table(t) -> t.name
+            Generations(g) -> s"${written(g.life.survive)}/${written(g.life.birth)}/${g.states}"
+            Wolfram(code) -> s"W${code}"
 
     // Whether two rules make every cell the same: a B/S rule and the Hensel rule naming every
-    // arrangement of the same counts are one rule.
+    // arrangement of the same counts are one rule, and so is a Generations rule of two states.
     same(self, other: Rule) -> bool
+        (two_state(self), two_state(other)) match
+            (Some((b1, s1)), Some((b2, s2))) -> return b1 == b2 && s1 == s2
+            _ -> ()
+
         (self, other) match
-            (LifeLike(b1, s1), LifeLike(b2, s2)) -> b1 == b2 && s1 == s2
-            (Isotropic(h1), Isotropic(h2)) -> h1.birth == h2.birth && h1.survive == h2.survive
-            (LifeLike(b, s), Isotropic(h)) -> set_of(b) == h.birth && set_of(s) == h.survive
-            (Isotropic(h), LifeLike(b, s)) -> set_of(b) == h.birth && set_of(s) == h.survive
             (Table(t1), Table(t2)) -> t1.name == t2.name && t1.states == t2.states && t1.next == t2.next && t1.tree == t2.tree
+            (Generations(g1), Generations(g2)) ->
+                g1.states == g2.states && g1.life.birth == g2.life.birth && g1.life.survive == g2.life.survive
+            (Wolfram(c1), Wolfram(c2)) -> c1 == c2
             _ -> false
 end Rule
+
+// A Generations rule. A dead cell is born and a live one survives as `life` says; **a live cell that
+// does not survive is not dead yet**: it goes through states 2, 3, … a generation at a time, whatever
+// is around it, and is dead after `states - 1`. Only a live cell, state 1, counts as a neighbour.
+struct GenerationsRule
+    life: Hensel
+    // Whether any count was narrowed by letters. A rule without them is stepped by counting
+    // neighbours, and one with them by their arrangement.
+    lettered: bool
+    states: int
+
+    // What a cell in `state` becomes, `next` being what `life` says of it: whether a dead cell is
+    // born, whether a live one survives. A dying cell ignores it.
+    after(self, state: u8, next: bool) -> u8
+        if state == 0 then return if next then 1 else 0
+
+        if state == 1 && next then return 1
+
+        if int(state) + 1 == self.states then 0 else state + 1
+
+// The births and survivals of a rule with two states, as sets of arrangements; none for the rest.
+private two_state(r: Rule) -> Option[(u64, u64)] =
+    r match
+        LifeLike(b, s) -> Some((set_of(b), set_of(s)))
+        Isotropic(h) -> Some((h.birth, h.survive))
+        Generations(g) -> if g.states == 2 then Some((g.life.birth, g.life.survive)) else None
+        Table(_) | Wolfram(_) -> None
 
 // The counts a mask holds, as the digits B/S notation writes them in.
 private counts(mask: u16) -> string
@@ -64,8 +103,14 @@ private counts(mask: u16) -> string
 // be followed by Hensel letters** (`B2a`), or by `-` and letters (`B2-a`), naming which arrangements
 // of that many neighbours it means; see `hensel.sysl`. Letters, `B` and `S` may be either case, as
 // Golly reads them. A rule with no letters anywhere is a B/S rule; one with any is isotropic, even
-// when its letters add up to whole counts. Anything else is refused with a diagnostic pointing at the
-// byte that broke it.
+// when its letters add up to whole counts.
+//
+// **A third part makes it a Generations rule**: the number of states, from 2 to 256, after `/C` when
+// the halves are lettered (`B2/S/C3`, `S345/B2/C4`) and after a bare `/` when they are not (`/2/3`,
+// `345/2/4`, MCell's survivals, births, states). Hensel letters may narrow its counts as anywhere else
+// (`B2-a/S12/C5`). **`W` and a number from 0 to 255 is a Wolfram code** (`W110`).
+//
+// Anything else is refused with a diagnostic pointing at the byte that broke it.
 parse_rule(text: string) -> Result[Rule, Diagnostic]
     var s = scanner_of(text)
 
@@ -76,6 +121,12 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
     val first = s.peek().unwrap()
     var birth = Half(0, false)
     var survive = Half(0, false)
+    // Whether the halves were introduced by `B` and `S`, so that a count of states is introduced by `C`.
+    var named = true
+
+    if first == u8('W') || first == u8('w')
+        s.bump()
+        return wolfram(&s)
 
     if first == u8('B') || first == u8('b')
         s.bump()
@@ -88,6 +139,7 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
         expect_half(&s, u8('B'))?
         birth = read_half(&s)?
     elif first.is_digit() || first == u8('/')
+        named = false
         survive = read_half(&s)?
 
         if !s.accept(u8('/')) then return Err(error(s.here(), "expected `/` between the survival and birth counts"))
@@ -96,15 +148,61 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
     else
         return Err(error(Span(s.offset, s.offset + 1), "expected a rule such as B3/S23"))
 
-    s.skip_blanks()
+    var states = 0
 
-    if !s.at_end()
-        return Err(error(Span(s.offset, text.len), "unexpected text after the rule"))
+    if s.accept(u8('/'))
+        if named && !s.accept(u8('C')) && !s.accept(u8('c'))
+            return Err(error(s.here(), "expected `C` and the number of states after the `/`"))
 
-    if birth.lettered || survive.lettered then return Ok(Isotropic(hensel(birth.set, survive.set)))
+        states = read_states(&s)?
+
+    end_of_rule(&s)?
+
+    val lettered = birth.lettered || survive.lettered
+
+    if states > 0 then return Ok(Generations(GenerationsRule(hensel(birth.set, survive.set), lettered, states)))
+
+    if lettered then return Ok(Isotropic(hensel(birth.set, survive.set)))
 
     Ok(LifeLike(counts_of(birth.set), counts_of(survive.set)))
 end parse_rule
+
+// Blanks, then nothing.
+private end_of_rule(s: *Scanner) -> Result[unit, Diagnostic]
+    s.skip_blanks()
+
+    if !s.at_end() then return Err(error(Span(s.offset, s.src.len), "unexpected text after the rule"))
+
+    Ok(())
+
+// A Generations rule's number of states: at least 2, dead and alive, and at most 256, as Golly allows.
+private read_states(s: *Scanner) -> Result[int, Diagnostic]
+    val m = s.mark()
+
+    if !s.peek().unwrap_or(0).is_digit() then return Err(error(s.here(), "expected the number of states, such as 3"))
+
+    val n = read_digits(s, 10).unwrap_or(1000)
+
+    if n < 2 then return Err(error(s.span_from(m), "a Generations rule has at least 2 states, dead and alive"))
+
+    if n > 256 then return Err(error(s.span_from(m), "a Generations rule has at most 256 states"))
+
+    Ok(int(n))
+
+// The number after `W`: a byte, whose bit `4l + 2c + r` is what a cell becomes when it is `c` and its
+// west and east neighbours are `l` and `r`.
+private wolfram(s: *Scanner) -> Result[Rule, Diagnostic]
+    val m = s.mark()
+
+    if !s.peek().unwrap_or(0).is_digit() then return Err(error(s.here(), "expected the rule's number after `W`, such as W110"))
+
+    val n = read_digits(s, 10).unwrap_or(1000)
+
+    if n > 255 then return Err(error(s.span_from(m), "a Wolfram code is a number from 0 to 255"))
+
+    end_of_rule(s)?
+
+    Ok(Wolfram(u8(n)))
 
 // One half of a rule as read: the arrangements it names, and whether any count carried letters.
 private struct Half

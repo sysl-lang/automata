@@ -1,0 +1,537 @@
+@tests
+
+// Generations rules and Wolfram codes, checked against what they did not compute themselves: a
+// cell-by-cell step written the obvious way for each, Swirl.rule's tree, a rule table written out by
+// hand, and Pascal's triangle.
+
+import sysl.buf.{Buf, buf}
+import sysl.rand.{Rng, rng}
+import sysl.text.from_utf8
+
+private val SWIRL = from_utf8(embed("rules/Swirl.rule")).unwrap()
+
+private val WIDTHS = [1, 5, 63, 64, 65, 130]
+
+private generations(text: string) -> GenerationsRule =
+    parse_rule(text).unwrap() match
+        Generations(g) -> g
+        _ -> panic(s"${text} did not read as a Generations rule")
+
+// -- the oracles -------------------------------------------------------------------------------------
+
+// One Generations step, one cell at a time: gather the neighbours in state 1 into a pattern of bits,
+// ask the births and survivals about it, and age every other cell.
+private naive(g: Grid, r: GenerationsRule) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            var m = 0
+
+            for k in 0..<8
+                val (dx, dy) = NEIGHBOURS[k]
+
+                if g.state(x + dx, y + dy) == 1 then m |= 1 << k
+
+            val s = int(g.state(x, y))
+            var next = 0
+
+            if s == 0
+                next = if r.life.next(false, m) then 1 else 0
+            elif s == 1
+                next = if r.life.next(true, m) then 1 elif r.states > 2 then 2 else 0
+            elif s + 1 < r.states
+                next = s + 1
+
+            out.set_state(x, y, u8(next))
+
+    out
+end naive
+
+// One Wolfram step of a line, a cell at a time: its west neighbour, itself and its east neighbour
+// make a number from 0 to 7, and the code's bit there is what it becomes.
+private naive_line(line: []u8, code: int, ring: bool) -> Buf[u8]
+    val n = int(line.len)
+    val out: Buf[u8] = buf()
+
+    for x in 0..<n
+        val l = if x > 0 then line[usize(x - 1)] elif ring then line[usize(n - 1)] else 0
+        val r = if x < n - 1 then line[usize(x + 1)] elif ring then line[0] else 0
+        val c = line[usize(x)]
+
+        out.push(u8((code >> (4 * int(l) + 2 * int(c) + int(r))) & 1))
+
+    out
+
+// Row `y` as `0` and `1`, west first.
+private row_of(g: Grid, y: int) -> string
+    var out = ""
+
+    for x in 0..<g.width
+        out = s"${out}${if g.get(x, y) then 1 else 0}"
+
+    out
+
+private text_of(line: Buf[u8]) -> string
+    var out = ""
+
+    for i in 0..<line.len()
+        out = s"${out}${line[i]}"
+
+    out
+
+private random(r: *Rng, width: int, height: int, edges: Edges, states: int) -> Grid
+    var g = grid(width, height, edges)
+
+    for y in 0..<height
+        for x in 0..<width
+            // Half the cells dead, so that births have room.
+            if r.below(2) == 0 then g.set_state(x, y, u8(r.below(u64(states))))
+
+    g
+
+private copy_of(g: Grid) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            out.set_state(x, y, g.state(x, y))
+
+    out
+
+// Does the step agree with the oracle on random grids of every width, on both edges?
+private agrees_with_naive(text: string, seed: u64, steps: int)
+    val rule = parse_rule(text).unwrap()
+    val g = generations(text)
+    var r = rng(seed, 3)
+
+    for w in 0..<WIDTHS.len
+        for e in [Torus, Bounded]
+            var fast = random(&r, WIDTHS[w], 13, e, g.states)
+            var slow = copy_of(fast)
+
+            for gen in 0..<steps
+                fast.step(rule)
+                slow = naive(slow, g)
+                assert(fast.same_cells(slow), s"${text}, width ${WIDTHS[w]}, generation ${gen}")
+
+// -- Generations: reading ----------------------------------------------------------------------------
+
+@test("B/S/C, S/B/C and MCell's survivals/births/states all read as one Generations rule")
+gen_spellings()
+    val brain = generations("/2/3")
+
+    assert_eq(brain.states, 3)
+    assert(!brain.lettered)
+
+    for text in ["B2/S/C3", "b2/s/c3", "S/B2/C3", "/2/3", " /2/3 "]
+        assert(parse_rule(text).unwrap().same(Generations(brain)), text)
+
+    for text in ["S345/B2/C4", "B2/S345/C4", "345/2/4"]
+        assert(parse_rule(text).unwrap().same(parse_rule("345/2/4").unwrap()), text)
+
+    assert(!parse_rule("/2/4").unwrap().same(Generations(brain)))
+    assert(!parse_rule("/3/3").unwrap().same(Generations(brain)))
+
+@test("a Generations rule of two states is the B/S rule of the same counts; of three it is not")
+gen_two_states()
+    val two = parse_rule("23/3/2").unwrap()
+
+    assert(two.same(parse_rule("B3/S23").unwrap()))
+    assert(parse_rule("B3/S23").unwrap().same(two))
+    assert(parse_rule("B3/S2-a3/C2").unwrap().same(parse_rule("B3/S2-a3").unwrap()))
+    assert(!parse_rule("23/3/3").unwrap().same(parse_rule("B3/S23").unwrap()))
+
+@test("letters narrow a Generations rule's counts as they narrow a B/S rule's")
+gen_letters()
+    val g = generations("B2-a/S12/C5")
+
+    assert(g.lettered)
+    assert_eq(g.states, 5)
+    assert_eq(g.life.birth, isotropic_sets("B2-a/S12").0)
+    assert_eq(g.life.survive, isotropic_sets("B2-a/S12").1)
+
+private isotropic_sets(text: string) -> (u64, u64) =
+    parse_rule(text).unwrap() match
+        Isotropic(h) -> (h.birth, h.survive)
+        LifeLike(b, s) -> (set_of(b), set_of(s))
+        _ -> panic(s"${text} is a two-state rule")
+
+@test("a Generations rule's notation is Golly's survivals/births/states, and reads back to the same rule")
+gen_notation()
+    val cases = [
+        ("/2/3", "/2/3"),
+        ("B2/S/C3", "/2/3"),
+        ("S345/B2/C4", "345/2/4"),
+        ("B34/S23/C8", "23/34/8"),
+        ("B2-a/S12/C5", "12/2-a/5"),
+        ("B2ce/S1e/C256", "1e/2ce/256"),
+        ("23/3/2", "23/3/2"),
+    ]
+
+    for i in 0..<cases.len
+        val (text, want) = cases[i]
+        val rule = parse_rule(text).unwrap()
+
+        assert_eq(rule.notation(), want)
+        assert(parse_rule(rule.notation()).unwrap().same(rule), text)
+
+@test("a Generations rule that does not read is refused at the byte that broke it")
+gen_errors()
+    val cases = [
+        ("B3/S23/", "expected `C`", 7),
+        ("B3/S23/X3", "expected `C`", 7),
+        ("B3/S23/C", "number of states", 8),
+        ("B3/S23/Cx", "number of states", 8),
+        ("B3/S23/C1", "at least 2", 8),
+        ("/2/1", "at least 2", 3),
+        ("/2/0", "at least 2", 3),
+        ("B2/S/C257", "at most 256", 6),
+        ("/2/99999999999999999999999", "at most 256", 3),
+        ("B2z/S/C3", "not an arrangement of 2", 2),
+        ("/2-/3", "must be followed", 2),
+        ("/9/3", "8 neighbours", 1),
+        ("B3/S23/C3x", "unexpected text", 9),
+        ("/2/3/4", "unexpected text", 4),
+        ("/2/", "number of states", 3),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rule(text).expect_err(text)
+
+        assert(d.message.contains(says), s"${text}: ${d.message}")
+        assert_eq(d.span.start, usize(at), text)
+
+// -- Generations: stepping ---------------------------------------------------------------------------
+
+@test("a live cell that does not survive goes through every dying state and is then dead")
+gen_dying()
+    for states in [2, 3, 8]
+        val rule = parse_rule(s"/2/${states}").unwrap()
+        var g = grid(5, 5, Torus)
+
+        g.set_state(2, 2, 1)
+
+        for want in 2..states
+            g.step(rule)
+            assert_eq(int(g.state(2, 2)), want % states)
+            assert_eq(g.population(), if want == states then 0 else 1)
+
+@test("a dying cell is no one's neighbour: two live cells and a dying one make no birth under B3")
+gen_dying_is_not_counted()
+    // Under B3/S/C3 the dead cell above the middle sees two live cells and one dying one.
+    val rule = parse_rule("B3/S/C3").unwrap()
+    var g = grid(7, 5, Bounded)
+
+    g.set_state(2, 2, 1)
+    g.set_state(3, 2, 2)
+    g.set_state(4, 2, 1)
+    g.step(rule)
+
+    assert_eq(int(g.state(3, 1)), 0)
+    assert_eq(int(g.state(3, 2)), 0)
+    assert_eq(int(g.state(2, 2)), 2)
+
+@test("Brian's Brain steps as the naive oracle does on random grids, every width, both edges")
+gen_brain_matches_naive()
+    agrees_with_naive("/2/3", 11, 12)
+
+@test("Star Wars, a lettered rule, a two-state one and one with B0 step as the oracle does")
+gen_others_match_naive()
+    agrees_with_naive("345/2/4", 12, 10)
+    agrees_with_naive("B2-a/S12/C5", 13, 10)
+    agrees_with_naive("B3/S23/C2", 14, 6)
+    agrees_with_naive("B017/S1/C6", 15, 6)
+    agrees_with_naive("12/34/256", 16, 6)
+
+@test("Swirl.rule, Generations 23/34/8 written as a tree, steps bit for bit as `23/34/8` does")
+gen_swirl_tree()
+    val tree = Table(parse_rule_file(SWIRL).unwrap())
+    val rule = parse_rule("23/34/8").unwrap()
+    var r = rng(17, 5)
+
+    for w in 0..<WIDTHS.len
+        for e in [Torus, Bounded]
+            var a = random(&r, WIDTHS[w], 11, e, 8)
+            var b = copy_of(a)
+
+            for gen in 0..<12
+                a.step(rule)
+                b.step(tree)
+                assert(a.same_cells(b), s"width ${WIDTHS[w]}, generation ${gen}")
+
+@test("B2-a/S12/C5 steps as the same rule written out by hand as a Golly table does")
+gen_letters_table()
+    val table = Table(parse_rule_file(hand_table()).unwrap())
+    val rule = parse_rule("B2-a/S12/C5").unwrap()
+    var r = rng(19, 2)
+
+    for w in 0..<WIDTHS.len
+        for e in [Torus, Bounded]
+            var a = random(&r, WIDTHS[w], 9, e, 5)
+            var b = copy_of(a)
+
+            for gen in 0..<10
+                a.step(rule)
+                b.step(table)
+                assert(a.same_cells(b), s"width ${WIDTHS[w]}, generation ${gen}")
+
+// B2-a/S12/C5 as a rule table under rotate4reflect. Each arrangement is one transition, its live
+// neighbours by place in the ring (N, NE, E, SE, S, SW, W, NW) and every other neighbour any state
+// but 1: births for the pairs `c` (NE, SE), `e` (N, E), `k` (N, SE), `i` (N, S) and `n` (NE, SW) but
+// not `a` (N, NE); survival with one neighbour on an edge or a corner, or with any two; then a live
+// cell starts to die, and a dying one goes on.
+private hand_table() -> string
+    var out = "@RULE handmade\n@TABLE\nn_states:5\nneighborhood:Moore\nsymmetries:rotate4reflect\n"
+
+    for i in 1..8
+        out = s"${out}var d${i}={0,2,3,4}\nvar a${i}={0,1,2,3,4}\n"
+
+    for pair in [0b1010, 0b101, 0b1001, 0b10001, 0b100010]
+        out = s"${out}${transition(0, pair, 1)}"
+
+    for live in [0b1, 0b10, 0b11, 0b1010, 0b101, 0b1001, 0b10001, 0b100010]
+        out = s"${out}${transition(1, live, 1)}"
+
+    for state in 1..4
+        var line = s"${state}"
+
+        for i in 1..8
+            line = s"${line},a${i}"
+
+        out = s"${out}${line},${(state + 1) % 5}\n"
+
+    out
+
+// A transition whose live neighbours are the bits of `live`, bit `i` the ring's place `i`.
+private transition(state: int, live: int, next: int) -> string
+    var line = s"${state}"
+
+    for i in 0..<8
+        line = if (live >> i) & 1 == 1 then s"${line},1" else s"${line},d${i + 1}"
+
+    s"${line},${next}\n"
+
+@test("a Brian's Brain spaceship moves a cell a generation")
+gen_brain_spaceship()
+    val p = parse_rle("x = 2, y = 2, rule = /2/3\nBA$BA!").unwrap()
+    var g = grid(20, 6, Torus)
+
+    p.stamp(&g, 3, 2)
+
+    for gen in 0..<9
+        g.step(p.rule.unwrap())
+
+    var want = grid(20, 6, Torus)
+
+    p.stamp(&want, 12, 2)
+    assert(g.same_cells(want))
+
+@test("a Generations pattern reads its rule and its states from RLE, and the bundled ones run")
+gen_rle()
+    val p = parse_rle("#N t\nx = 4, y = 1, rule = B2/S345/C4\nABC.!").unwrap()
+
+    assert(p.rule.unwrap().same(parse_rule("345/2/4").unwrap()))
+    assert_eq(int(p.most_state()), 3)
+
+    var g = grid(8, 3, Bounded)
+
+    p.stamp(&g, 0, 1)
+    assert_eq(int(g.state(0, 1)), 1)
+    assert_eq(int(g.state(1, 1)), 2)
+    assert_eq(int(g.state(2, 1)), 3)
+    assert_eq(g.population(), 3)
+
+    for name in ["Brian's Brain", "Star Wars"]
+        var found = false
+
+        for text in bundled()
+            val q = parse_rle(text).unwrap()
+
+            if q.name.starts_with(name)
+                found = true
+
+                q.rule.unwrap() match
+                    Generations(_) -> ()
+                    _ -> panic(s"${name} is not under a Generations rule")
+
+                assert(int(q.most_state()) >= 2, name)
+
+        assert(found, name)
+
+@test("--rule and a pattern's own rule are refused when the pattern has states the Generations rule lacks")
+gen_cli_states()
+    val p = parse_rle("x = 1, y = 1, rule = /2/3\nC!").unwrap()
+
+    assert(chosen_rule("", p).unwrap_err().contains("states are 0 to 2"))
+    assert(chosen_rule("/2/4", p).is_ok())
+    assert(chosen_rule("/2/3", p).is_err())
+
+// -- Wolfram codes -----------------------------------------------------------------------------------
+
+@test("W and a number from 0 to 255 is a Wolfram code, which reads back from its notation")
+wol_reading()
+    for code in [0, 1, 30, 90, 110, 255]
+        val rule = parse_rule(s"W${code}").unwrap()
+
+        assert(rule.same(Wolfram(u8(code))))
+        assert_eq(rule.notation(), s"W${code}")
+        assert(parse_rule(rule.notation()).unwrap().same(rule))
+
+    assert(parse_rule("w30").unwrap().same(Wolfram(30)))
+    assert(!parse_rule("W30").unwrap().same(Wolfram(31)))
+    assert(!parse_rule("W30").unwrap().same(parse_rule("B3/S23").unwrap()))
+
+@test("a Wolfram code that does not read is refused at the byte that broke it")
+wol_errors()
+    val cases = [
+        ("W", "expected the rule's number", 1),
+        ("W-1", "expected the rule's number", 1),
+        ("W256", "from 0 to 255", 1),
+        ("W99999999999999999999999", "from 0 to 255", 1),
+        ("W30x", "unexpected text", 3),
+        ("W30/S", "unexpected text", 3),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rule(text).expect_err(text)
+
+        assert(d.message.contains(says), s"${text}: ${d.message}")
+        assert_eq(d.span.start, usize(at), text)
+
+@test("W30 from a single cell writes a row a generation, each the oracle's next line")
+wol_30_single_cell()
+    var g = grid(41, 30, Bounded)
+    var line: Buf[u8] = buf()
+
+    g.set(20, 0, true)
+
+    for x in 0..<41
+        line.push(if x == 20 then 1 else 0)
+
+    for gen in 1..<30
+        g.step(Wolfram(30))
+        line = naive_line(line.view(), 30, false)
+
+        for y in 0..<30
+            val row = row_of(g, y)
+
+            if y == gen then assert_eq(row, text_of(line), s"row ${y}") elif y > gen then assert(!row.contains("1"), s"row ${y} is ahead")
+
+    // W30's left edge is the regular one: the cells west of the start make a solid diagonal.
+    for y in 0..<20
+        assert(g.get(20 - y, y))
+
+@test("W90 from a single cell is Pascal's triangle mod 2")
+wol_90_pascal()
+    val n = 64
+    var g = grid(2 * n + 1, n, Bounded)
+
+    g.set(n, 0, true)
+
+    for gen in 1..<n
+        g.step(Wolfram(90))
+
+    for t in 0..<n
+        for j in -n..n
+            // Cell `j` of row `t` holds C(t, (t + j) / 2) mod 2 where `t + j` is even, which by Lucas's
+            // theorem is odd exactly when the lower index's bits are a subset of `t`'s.
+            val k = (t + j) / 2
+            val want = (t + j) % 2 == 0 && k >= 0 && k <= t && (k & t) == k
+
+            assert_eq(g.get(n + j, t), want, s"row ${t}, cell ${j}")
+
+@test("every code, W110 among them, steps random lines as the oracle does, every width, both edges")
+wol_every_code()
+    var r = rng(23, 7)
+
+    for code in 0..<256
+        for w in 0..<WIDTHS.len
+            for e in [Torus, Bounded]
+                var g = grid(WIDTHS[w], 6, e)
+                var line: Buf[u8] = buf()
+
+                for x in 0..<WIDTHS[w]
+                    val bit = u8(r.below(2))
+
+                    line.push(bit)
+                    g.set(x, 0, bit == 1)
+
+                for gen in 1..<6
+                    g.step(Wolfram(u8(code)))
+                    line = naive_line(line.view(), code, e == Torus)
+                    assert(row_of(g, gen) == text_of(line), s"W${code}, width ${WIDTHS[w]}, generation ${gen}")
+
+@test("once the grid is full the history scrolls: the bottom row is the latest generation")
+wol_scrolls()
+    var g = grid(65, 4, Torus)
+    var r = rng(29, 1)
+    var lines: Buf[Buf[u8]] = buf()
+    var first: Buf[u8] = buf()
+
+    for x in 0..<65
+        val bit = u8(r.below(2))
+
+        first.push(bit)
+        g.set(x, 0, bit == 1)
+
+    lines.push(first)
+
+    for gen in 1..<20
+        g.step(Wolfram(110))
+        lines.push(naive_line(lines[usize(gen - 1)].view(), 110, true))
+
+    for y in 0..<4
+        assert_eq(row_of(g, y), text_of(lines[usize(16 + y)]), s"row ${y}")
+
+@test("the latest generation is the lowest row with a live cell, found again after an edit or another rule")
+wol_front()
+    var g = grid(9, 6, Bounded)
+
+    g.set(4, 2, true)
+    g.step(Wolfram(250))
+    assert_eq(row_of(g, 3), "000101000")
+
+    // An odd code turns the empty neighbourhood on, so an empty grid's first step fills row 1.
+    var e = grid(5, 3, Bounded)
+
+    e.step(Wolfram(1))
+    assert_eq(row_of(e, 1), "11111")
+    assert_eq(row_of(e, 2), "00000")
+
+    // Then the line goes on from row 1, though row 2 has nothing in it.
+    e.step(Wolfram(1))
+    assert_eq(row_of(e, 2), "00000")
+    assert_eq(e.population(), 5)
+
+    // An edit means the lowest live row is the line again: W204 copies it into row 2.
+    e.set(2, 0, true)
+    e.step(Wolfram(204))
+    assert_eq(row_of(e, 2), "11111")
+    assert_eq(e.front, 2)
+
+    // Any other rule's step forgets the line, so a Wolfram step after it looks for it again.
+    e.step(parse_rule("B3/S23").unwrap())
+    assert_eq(e.front, -1)
+    e.step(Wolfram(204))
+    assert(e.front >= 0)
+
+@test("an RLE header names a Wolfram code by its notation, not as a rule file")
+wol_rle()
+    val p = parse_rle("x = 1, y = 1, rule = W110\no!").unwrap()
+
+    assert(p.rule.unwrap().same(Wolfram(110)))
+    assert_eq(p.rule_name, "")
+
+    // The rows below a Wolfram pattern are its future, so it is drawn at the top, centred across.
+    var g = grid(9, 7, Torus)
+
+    p.stamp_centred(&g)
+    assert_eq(row_of(g, 0), "000010000")
+    assert_eq(g.population(), 1)
+
+    val named = parse_rle("x = 1, y = 1, rule = Wire110x\no!").unwrap()
+
+    assert_eq(named.rule_name, "Wire110x")

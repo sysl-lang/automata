@@ -1,7 +1,8 @@
 # automata
 
 Cellular automata in [sysl](https://github.com/sysl-lang/sysl): a bit-packed grid that steps
-64 cells per machine word, any rule written in B/S or Hensel notation, Golly rule tables, RLE patterns, and a
+64 cells per machine word, any rule written in B/S, Hensel or Generations notation, Wolfram's
+elementary rules, Golly rule tables, RLE patterns, and a
 [syslUI](https://github.com/sysl-lang/syslui) viewer.
 
 ![The Gosper glider gun after 60 generations](shot.png)
@@ -43,6 +44,58 @@ per cell, sliding each cell's 3×3 block along the packed words a column at a ti
 every arrangement against LifeWiki's drawing of it in all eight orientations, B/S rules spelled out
 letter by letter against the B/S engine, random rules against a cell-by-cell oracle, and tlife against
 the same rule written as a Golly `rotate4reflect` table.
+
+## Generations
+
+```
+sysl run . -- --pattern 6
+sysl run . -- --rule /2/3 --size 256x192
+```
+
+**Generations rules** are read as Golly reads them: `B2/S/C3` (births, survivals, and the number of
+states after `C`), the same with `S` first, or MCell's survivals/births/states with no letters, `/2/3`
+and `345/2/4`. Hensel letters narrow the counts as they do anywhere (`B2-a/S12/C5`). There are 2 to
+256 states: 0 is dead, 1 alive, and a live cell that does not survive goes through 2, 3, … to
+`states - 1` a generation at a time, whatever is around it, and is then dead. Only state 1 counts as a
+neighbour. The status line writes the rule in Golly's survivals/births/states (`345/2/4`), and a
+Generations rule of two states is the B/S rule of the same counts.
+
+The step counts neighbours on a plane of state-1 bits with the word-at-a-time step a two-state rule
+runs (or, with letters, the 512-entry table), and keeps each cell's state in a byte: every dying cell
+changes every generation, so it needs its own write whatever the engine, and the bytes are what the
+viewer and the rule tables already read. The viewer draws the dying states fading from the live
+colour towards the board's. The tests run Brian's Brain, Star Wars, a lettered rule, a two-state
+rule, one with `B0` and one of 256 states against a cell-by-cell oracle on six widths and both edges;
+`23/34/8` against `rules/Swirl.rule`'s tree bit for bit; and `B2-a/S12/C5` against the same rule
+written out by hand as a `rotate4reflect` table.
+
+## Wolfram's elementary rules
+
+```
+sysl run . -- --pattern 8
+sysl run . -- --rule W30 --bounded
+```
+
+`W` and a number from 0 to 255 is one of Wolfram's elementary rules, as Golly names them: a line of
+cells, each becoming bit `4l + 2c + r` of the number, `c` being the cell and `l` and `r` its west and
+east neighbours. Golly runs one on the plane, a generation to a row, and so does this: **the grid is
+the line's history**, and a step writes the row after the latest one from it, leaving every other row
+alone. Once the bottom row is reached the history scrolls up, so the latest generation is always the
+bottom row. The latest generation is the lowest row with a live cell in it when a run starts, and
+again after the grid is edited or another rule has run; a pattern under a `W` rule is placed at the
+top.
+
+The grid's edges are the line's ends: a torus makes the line a ring, and bounded holds it between dead
+cells. Top and bottom are only history.
+
+**Odd numbers are allowed here, though Golly refuses them.** An odd rule turns a dead cell between dead
+neighbours on, and Golly, which applies the rule to every row at once, would fill the empty plane below
+the pattern, the problem `B0` rules have. Here only the row after the latest is ever written, so the
+rows below cannot fill, and an odd rule is the elementary automaton it is defined to be: `W1` from an
+empty bounded line alternates between all on and all off. The tests check every one of the 256 rules
+against a cell-by-cell oracle on random lines of six widths on both edges, `W30` from one cell row by
+row, and `W90` from one cell against Pascal's triangle mod 2. Wolfram's k-colour totalistic codes are
+not read: Golly has no notation for them, and this program reads only existing rule languages.
 
 ## Rule files
 
@@ -90,9 +143,10 @@ sysl run . -- --rule-file rules/Swirl.rule --pattern 4
 RLE as Golly and LifeWiki write it: `#` lines (`#N` names the pattern), the `x = , y = , rule =`
 header, runs of `b` and `o`, `$` and `!`. Multi-state patterns use Golly's letters: `.` for state 0,
 `A`–`X` for 1–24, and `pA`…`yO` above them. A header whose rule is a name (`rule = WireWorld`) needs
-the rule's file given with `--rule-file`. The reader is built on
-[`parsing`](https://github.com/sysl-lang/parsing). Five patterns are bundled: glider, R-pentomino,
-acorn, Gosper glider gun and pulsar.
+the rule's file given with `--rule-file`; one that names a `W` rule is that rule. The reader is built
+on [`parsing`](https://github.com/sysl-lang/parsing). Eight patterns are bundled: glider, R-pentomino,
+acorn, Gosper glider gun and pulsar; two Brian's Brain spaceships head on (`/2/3`); a Star Wars soup
+(`345/2/4`); and Rule 110 from one cell.
 
 ## The viewer
 
@@ -107,7 +161,8 @@ acorn, Gosper glider gun and pulsar.
 | `r` / `c` | random fill / clear |
 | `t` | torus / bounded |
 | `1`–`4` | Life, HighLife, Seeds, Day & Night |
-| `5`–`9` | the bundled patterns |
+| `5`–`9` | the first five bundled patterns |
+| `0` | the next of the others: Brian's Brain, Star Wars, Rule 110 |
 | the rule field, then Return or **apply** | run a typed rule |
 
 `--shot <png>` opens no window: it runs the pattern for `--generations` (default 100), lays out and

@@ -159,7 +159,7 @@ struct Hensel
 
     // The rule in Golly's canonical spelling: births then survivals, a count whose every arrangement
     // is in written bare, and otherwise whichever of its letters or `-` and the others is shorter.
-    notation(self) -> string = s"B${half(self.birth)}/S${half(self.survive)}"
+    notation(self) -> string = s"B${written(self.birth)}/S${written(self.survive)}"
 end Hensel
 
 // A rule from its two sets of arrangements, with its table of answers filled in.
@@ -181,7 +181,7 @@ hensel(birth: u64, survive: u64) -> Hensel
     Hensel(birth, survive, answers)
 
 // One half of a rule's notation.
-private half(set: u64) -> string
+written(set: u64) -> string
     var out = ""
 
     for n in 0..8

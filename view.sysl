@@ -10,7 +10,7 @@ import sh.sysl.ui.{View, Canvas, Size, Rect, Signal, signal, column, row, text, 
                    spacer, NOBODY}
 import sh.sysl.ui_sdl.stop
 import sh.sysl.sdl3.{Event, EventKind, SCANCODE_ESCAPE, SCANCODE_SPACE, SCANCODE_N, SCANCODE_R,
-                     SCANCODE_C, SCANCODE_T, SCANCODE_1, SCANCODE_EQUALS, SCANCODE_MINUS,
+                     SCANCODE_C, SCANCODE_T, SCANCODE_0, SCANCODE_1, SCANCODE_EQUALS, SCANCODE_MINUS,
                      SCANCODE_KP_PLUS, SCANCODE_KP_MINUS, SCANCODE_RETURN, SCANCODE_KP_ENTER}
 import sysl.math.{Float, clamp, max, min}
 import sysl.rand.{Rng, rng}
@@ -46,6 +46,8 @@ struct Model
     owed: real
     // Whether a field has the keyboard, so typing a rule does not also drive the shortcuts.
     typing: bool
+    // Which of the patterns past the number keys' `0` loads next.
+    more: int
     random: Rng
     generation: &Signal[int]
     rule_text: &Signal[string]
@@ -85,7 +87,7 @@ struct Model
 end Model
 
 model(g: Grid, rule: Rule) -> &Model =
-    Model(g, rule, false, 3, 4.0, 0.0, 0.0, false, 0.0, false, rng(1, 1), signal(0),
+    Model(g, rule, false, 3, 4.0, 0.0, 0.0, false, 0.0, false, 0, rng(1, 1), signal(0),
           signal(rule.notation()), signal(""))
 
 // The whole window: the board, then the status line and the rule field under it.
@@ -101,7 +103,7 @@ screen(m: &Model) -> &View =
         text(if m.message.read() != "" then m.message.read() else HINT).pad(left = 8, bottom = 8),
     ])
 
-const HINT: string = "space run · n step · +/- speed · r random · c clear · t edges · 1-4 rules · 5-9 patterns"
+const HINT: string = "space run · n step · +/- speed · r random · c clear · t edges · 1-4 rules · 5-9, 0 patterns"
 
 status(m: &Model) -> string
     val edges = if m.grid.edges == Torus then "torus" else "bounded"
@@ -142,7 +144,7 @@ impl View for Board
         // A rule table gives state 0 a colour of its own, which the whole grid is laid in first.
         m.rule match
             Table(t) -> c.fill(Rect(int(left), int(top), int(z * real(g.width)), int(z * real(g.height))), t.colours[0])
-            LifeLike(_, _) | Isotropic(_) -> ()
+            LifeLike(_, _) | Isotropic(_) | Generations(_) | Wolfram(_) -> ()
 
         // Only the rows and columns that land inside the board are looked at.
         val y0 = max(0, int(((real(r.y) - top) / z).floor()))
@@ -199,11 +201,13 @@ impl View for Board
             m.oy = real(py) - real(r.y) - cy * next
     end paint
 
-// The colour a cell in `state` is drawn in: a table's own colours, or the one colour of a live cell.
+// The colour a cell in `state` is drawn in: a table's own colours, or the one colour of a live cell,
+// which a Generations rule's dying states fade from towards the board's.
 private colour_of(rule: Rule, state: u8) -> u32 =
     rule match
         Table(t) -> t.colours[usize(state)]
-        LifeLike(_, _) | Isotropic(_) -> LIVE
+        Generations(g) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, g.states - 1)
+        LifeLike(_, _) | Isotropic(_) | Wolfram(_) -> LIVE
 
 // What a frame does on its own: run as many generations as the speed owes.
 tick(m: &Model, dt: real)
@@ -268,8 +272,13 @@ shortcut(m: &Model, e: Event) -> bool
 
         if i < rules.len
             m.use_rule(rules[i])
-        elif i - rules.len < patterns.len
+        elif i - rules.len < usize(KEYED)
             m.load(parse_rle(patterns[i - rules.len]).unwrap())
+    elif key == SCANCODE_0
+        val patterns = bundled()
+
+        m.load(parse_rle(patterns[usize(KEYED + m.more)]).unwrap())
+        m.more = (m.more + 1) % (int(patterns.len) - KEYED)
     else
         return false
 

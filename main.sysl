@@ -1,7 +1,7 @@
-// Cellular automata: a bit-packed grid, any B/S or isotropic non-totalistic rule, Golly rule tables,
-// RLE patterns, and a syslUI viewer.
+// Cellular automata: a bit-packed grid, any B/S, isotropic non-totalistic or Generations rule,
+// Wolfram's elementary rules, Golly rule tables, RLE patterns, and a syslUI viewer.
 //
-//     automata [--rule <B…/S…> | --rule-file <file.rule>] [--pattern <1-5 | file.rle>]
+//     automata [--rule <B…/S… | B…/S…/C… | W…> | --rule-file <file.rule>] [--pattern <1-8 | file.rle>]
 //              [--size <w>x<h>] [--bounded]
 //     automata --shot <png> [--generations <n>] [same options]
 //
@@ -69,15 +69,21 @@ end main
 
 // The rule to start under: the one given with `--rule` if there was one, else the pattern's own, else
 // Life. A `--rule` that does not read is refused with the diagnostic drawn under the text, and so is a
-// pattern whose rule is a name, which only a rule file can supply.
+// pattern whose rule is a name, which only a rule file can supply, and one with cells in states a
+// Generations rule does not have.
 chosen_rule(given: string, p: Pattern) -> Result[Rule, string]
-    if given != ""
-        return parse_rule(given).map_err(d -> s"--rule could not be read\n${d.render(source_of("--rule", given))}")
-
-    if p.rule.is_none() && p.rule_name != ""
+    if p.rule.is_none() && p.rule_name != "" && given == ""
         return Err(s"the pattern's rule is `${p.rule_name}`, which is a rule file's name: give the file with --rule-file")
 
-    Ok(p.rule.unwrap_or(LifeLike(0b1000, 0b1100)))
+    val rule = if given != ""
+        parse_rule(given).map_err(d -> s"--rule could not be read\n${d.render(source_of("--rule", given))}")?
+    else
+        p.rule.unwrap_or(LifeLike(0b1000, 0b1100))
+
+    if rule is Generations(g) && int(p.most_state()) >= g.states
+        return Err(s"the pattern has cells in state ${p.most_state()}, and ${rule.notation()}'s states are 0 to ${g.states - 1}")
+
+    Ok(rule)
 
 // The rule table in the file at `file`, which must have every state the pattern uses.
 rule_file(file: string, given: string, p: Pattern) -> Result[Rule, string]

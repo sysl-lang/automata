@@ -14,8 +14,8 @@
 // **A pattern with more than two states writes them as Golly does**: `.` is state 0, `A` to `X` are
 // states 1 to 24, and a lower-case letter from `p` to `y` in front moves on by 24 for each step past
 // `o` — `pA` is 25, `qA` is 49, up to `yO`, 255. `b` and `o` are `.` and `A` again, so a two-state
-// pattern is one of these. Such a pattern's header names its rule (`rule = WireWorld`) rather than
-// spelling it, and the rule itself comes from a rule file.
+// pattern is one of these. Such a pattern's header spells a Generations rule (`rule = /2/3`) or names
+// a rule (`rule = WireWorld`), which then comes from a rule file.
 
 import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, read_digits, scanner_of, where}
 import sysl.buf.{Buf, buf}
@@ -29,7 +29,7 @@ struct Pattern
     name: string
     width: int
     height: int
-    // The rule the header names, if it gives one in B/S notation.
+    // The rule the header names, if it spells one in a notation `parse_rule` reads.
     rule: Option[Rule]
     // The rule the header names by name instead, such as `WireWorld`, or "".
     rule_name: string
@@ -53,8 +53,12 @@ struct Pattern
 
         most
 
-    // Draw it centred.
-    stamp_centred(self, g: *Grid) = self.stamp(g, (g.width - self.width) / 2, (g.height - self.height) / 2)
+    // Draw it centred; under a Wolfram rule at the top, centred across, since the rows below it are
+    // its future.
+    stamp_centred(self, g: *Grid)
+        val top = if self.rule is Some(Wolfram(_)) then 0 else (g.height - self.height) / 2
+
+        self.stamp(g, (g.width - self.width) / 2, top)
 end Pattern
 
 // Read an RLE pattern. A refusal is a diagnostic whose span points into `text`.
@@ -136,10 +140,15 @@ private names_a_rule(text: string) -> bool
 
     if b.len > 1 && (letter == u8('b') || letter == u8('s')) && (b[1].is_digit() || b[1] == u8('/')) then return false
 
+    var digits = true
+
     for i in 0..<b.len
         if !b[i].is_alnum() && b[i] != u8('-') && b[i] != u8('_') then return false
 
-    true
+        if i > 0 && !b[i].is_digit() then digits = false
+
+    // `W` and a number is a Wolfram code, which Golly reads as a rule of its own.
+    !(letter == u8('w') && b.len > 1 && digits)
 
 // `x = 3` or `y = 3`, with blanks anywhere between.
 private header_number(s: *Scanner, key: u8) -> Result[int, Diagnostic]

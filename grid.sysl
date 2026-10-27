@@ -12,7 +12,8 @@
 //
 // **A rule table has more than two states, so beside the bits is a byte per cell.** The bits always
 // say which cells are not in state 0, whatever the rule; the bytes hold each cell's state, and are
-// only kept up while a table is running or a cell has been set to a state above 1. A two-state step
+// only kept up while a table or a Generations rule is running or a cell has been set to a state
+// above 1. A two-state step
 // never touches them, and marks them stale instead.
 
 import sysl.buf.{Buf, buf_filled}
@@ -40,6 +41,8 @@ struct Grid
     spare_states: Buf[u8]
     // Whether `states` holds every cell's state. When it does not, a cell's state is its bit.
     fresh: bool
+    // Under a Wolfram rule, the row holding the line's latest generation; -1 until a step finds it.
+    front: int
 
     // Is the cell at `x`, `y` alive — in any state but 0? Coordinates outside the grid wrap on a
     // torus and are dead when bounded.
@@ -56,6 +59,7 @@ struct Grid
                 val bit = u64(1) << u64(cx % 64)
 
                 self.cells[i] = if alive then self.cells[i] | bit else self.cells[i] & ~bit
+                self.front = -1
 
                 if self.fresh then self.states[self.byte_at(cx, cy)] = if alive then 1 else 0
             None -> ()
@@ -83,6 +87,7 @@ struct Grid
             self.cells[i] = 0
 
         self.fresh = false
+        self.front = -1
 
     // How many cells are alive.
     population(self) -> int
@@ -118,6 +123,14 @@ struct Grid
 
     // Advance one generation under `rule`.
     step(*self, rule: Rule)
+        // A Wolfram rule's latest row is looked for again once another rule has run.
+        if rule is Wolfram(code)
+            self.step_wolfram(code)
+            self.fresh = false
+            return
+
+        self.front = -1
+
         rule match
             LifeLike(b, s) ->
                 self.step_life_like(b, s)
@@ -126,6 +139,8 @@ struct Grid
                 self.step_isotropic(h)
                 self.fresh = false
             Table(t) -> self.step_table(t)
+            Generations(g) -> self.step_generations(g)
+            Wolfram(_) -> ()
 
     // One generation under a rule table: a cell's state and its neighbours' make an index, and the
     // table holds what the cell becomes there. Then the bits are brought into line with the bytes.
@@ -193,41 +208,7 @@ struct Grid
 
         for y in 0..<self.height
             for k in 0..<self.stride
-                // Bit-sliced count of the eight neighbours: bit `i` of `c0..c3` is bit 0..3 of
-                // cell `i`'s count.
-                var c0: u64 = 0
-                var c1: u64 = 0
-                var c2: u64 = 0
-                var c3: u64 = 0
-
-                for dy in -1..1
-                    val row = y + dy
-                    val mid = self.row_word(row, k)
-                    val n1 = self.west(row, k, mid)
-                    val n2 = self.east(row, k, mid)
-
-                    c0, c1, c2, c3 = add(c0, c1, c2, c3, n1)
-                    c0, c1, c2, c3 = add(c0, c1, c2, c3, n2)
-
-                    if dy != 0 then c0, c1, c2, c3 = add(c0, c1, c2, c3, mid)
-
-                // Which cells' counts are a birth count, and which a survival count.
-                var born: u64 = 0
-                var stays: u64 = 0
-
-                for n in 0..9
-                    val b = (birth >> n) & 1 == 1
-                    val s = (survive >> n) & 1 == 1
-
-                    if b || s
-                        val is_n = pick(c0, n, 0) & pick(c1, n, 1) & pick(c2, n, 2) & pick(c3, n, 3)
-
-                        if b then born |= is_n
-
-                        if s then stays |= is_n
-
-                val alive = self.cells[self.word_at(k, y)]
-                var next = (born & ~alive) | (stays & alive)
+                var next = self.life_word(y, k, birth, survive)
 
                 if k == self.stride - 1 then next &= tail
 
@@ -237,35 +218,54 @@ struct Grid
 
         self.cells = self.spare
         self.spare = done
-    end step_life_like
+
+    // What word `k` of row `y` becomes under a B/S rule, its tail bits unmasked.
+    private life_word(self, y: int, k: int, birth: u16, survive: u16) -> u64
+        // Bit-sliced count of the eight neighbours: bit `i` of `c0..c3` is bit 0..3 of cell `i`'s
+        // count.
+        var c0: u64 = 0
+        var c1: u64 = 0
+        var c2: u64 = 0
+        var c3: u64 = 0
+
+        for dy in -1..1
+            val row = y + dy
+            val mid = self.row_word(row, k)
+            val n1 = self.west(row, k, mid)
+            val n2 = self.east(row, k, mid)
+
+            c0, c1, c2, c3 = add(c0, c1, c2, c3, n1)
+            c0, c1, c2, c3 = add(c0, c1, c2, c3, n2)
+
+            if dy != 0 then c0, c1, c2, c3 = add(c0, c1, c2, c3, mid)
+
+        // Which cells' counts are a birth count, and which a survival count.
+        var born: u64 = 0
+        var stays: u64 = 0
+
+        for n in 0..9
+            val b = (birth >> n) & 1 == 1
+            val s = (survive >> n) & 1 == 1
+
+            if b || s
+                val is_n = pick(c0, n, 0) & pick(c1, n, 1) & pick(c2, n, 2) & pick(c3, n, 3)
+
+                if b then born |= is_n
+
+                if s then stays |= is_n
+
+        val alive = self.cells[self.word_at(k, y)]
+
+        (born & ~alive) | (stays & alive)
+    end life_word
 
     // One generation under an isotropic rule, a cell at a time through the rule's table of answers.
-    // A word's three rows are lined up as `step_life_like` lines them up, and the index holds the
-    // columns west of, at and east of a cell: moving one cell east drops the west column and takes
-    // the next one in from the east words, whose bit `i` is cell `i + 1`.
     private step_isotropic(*self, h: Hensel)
         val tail = self.tail_mask()
 
         for y in 0..<self.height
             for k in 0..<self.stride
-                val north = self.row_word(y - 1, k)
-                val here = self.row_word(y, k)
-                val south = self.row_word(y + 1, k)
-                var en = self.east(y - 1, k, north)
-                var eh = self.east(y, k, here)
-                var es = self.east(y + 1, k, south)
-                val west = (self.west(y - 1, k, north) & 1) | ((self.west(y, k, here) & 1) << 1) |
-                    ((self.west(y + 1, k, south) & 1) << 2)
-                var index = int(west | ((north & 1) << 3) | ((here & 1) << 4) | ((south & 1) << 5))
-                var next: u64 = 0
-
-                for i in 0..<64
-                    index |= int((en & 1) << 6) | int((eh & 1) << 7) | int((es & 1) << 8)
-                    next |= u64(h.answers[usize(index)]) << u64(i)
-                    index >>= 3
-                    en >>= 1
-                    eh >>= 1
-                    es >>= 1
+                var next = self.isotropic_word(y, k, h)
 
                 if k == self.stride - 1 then next &= tail
 
@@ -275,7 +275,131 @@ struct Grid
 
         self.cells = self.spare
         self.spare = done
-    end step_isotropic
+
+    // What word `k` of row `y` becomes under an isotropic rule, its tail bits unmasked. A word's
+    // three rows are lined up as `life_word` lines them up, and the index holds the columns west of,
+    // at and east of a cell: moving one cell east drops the west column and takes the next one in
+    // from the east words, whose bit `i` is cell `i + 1`.
+    private isotropic_word(self, y: int, k: int, h: Hensel) -> u64
+        val north = self.row_word(y - 1, k)
+        val here = self.row_word(y, k)
+        val south = self.row_word(y + 1, k)
+        var en = self.east(y - 1, k, north)
+        var eh = self.east(y, k, here)
+        var es = self.east(y + 1, k, south)
+        val west = (self.west(y - 1, k, north) & 1) | ((self.west(y, k, here) & 1) << 1) |
+            ((self.west(y + 1, k, south) & 1) << 2)
+        var index = int(west | ((north & 1) << 3) | ((here & 1) << 4) | ((south & 1) << 5))
+        var next: u64 = 0
+
+        for i in 0..<64
+            index |= int((en & 1) << 6) | int((eh & 1) << 7) | int((es & 1) << 8)
+            next |= u64(h.answers[usize(index)]) << u64(i)
+            index >>= 3
+            en >>= 1
+            eh >>= 1
+            es >>= 1
+
+        next
+    end isotropic_word
+
+    // One generation under a Generations rule.
+    //
+    // **Only state 1 is anyone's neighbour, so the neighbours are counted on a plane of state-1 bits**,
+    // by the same word-at-a-time step a two-state rule runs, and its answer for each cell is whether
+    // a dead cell is born or a live one survives. **The dying states are a byte per cell**: every
+    // dying cell moves on every generation whatever its neighbours, so each needs its own write
+    // anyway, and the bytes are what a table rule and the viewer already read. Then the bits are
+    // brought back to saying which cells are not in state 0.
+    private step_generations(*self, g: GenerationsRule)
+        self.keep_states()
+
+        for y in 0..<self.height
+            for k in 0..<self.stride
+                var live: u64 = 0
+
+                for b in 0..<min(64, self.width - k * 64)
+                    if self.states[self.byte_at(k * 64 + b, y)] == 1 then live |= u64(1) << u64(b)
+
+                self.spare[self.word_at(k, y)] = live
+
+        val occupied = self.cells
+
+        self.cells = self.spare
+        self.spare = occupied
+
+        val (birth, survive) = (counts_of(g.life.birth), counts_of(g.life.survive))
+
+        for y in 0..<self.height
+            for k in 0..<self.stride
+                val answer = if g.lettered then self.isotropic_word(y, k, g.life) else self.life_word(y, k, birth, survive)
+                var next: u64 = 0
+
+                for b in 0..<min(64, self.width - k * 64)
+                    val at = self.byte_at(k * 64 + b, y)
+                    val state = g.after(self.states[at], (answer >> u64(b)) & 1 == 1)
+
+                    self.spare_states[at] = state
+
+                    if state != 0 then next |= u64(1) << u64(b)
+
+                self.spare[self.word_at(k, y)] = next
+
+        val done = self.cells
+
+        self.cells = self.spare
+        self.spare = done
+
+        val old = self.states
+
+        self.states = self.spare_states
+        self.spare_states = old
+    end step_generations
+
+    // One generation under a Wolfram rule: the row after the line's latest generation is written
+    // from it, and every other row is left as it is. When the latest is the bottom row, the history
+    // moves up a row first, so the oldest generation shown scrolls off the top.
+    //
+    // **The line is the row, and the grid's edges are its ends**: on a torus the line is a ring, and
+    // bounded it is held between cells that are dead for ever. Above and below are only history, so
+    // whether the grid wraps top to bottom does not matter here. Because a row is written only from
+    // the one above it, an odd code — which turns a dead cell between dead neighbours on — is no
+    // harder than an even one: the empty rows below are not stepped, so they cannot all fill.
+    //
+    // Before the first step the latest generation is the lowest row with a live cell in it, row 0 on
+    // an empty grid.
+    private step_wolfram(*self, code: u8)
+        if self.front < 0
+            self.front = 0
+
+            for y in 0..<self.height
+                for k in 0..<self.stride
+                    if self.cells[self.word_at(k, y)] != 0 then self.front = y
+
+        val tail = self.tail_mask()
+
+        // The next generation, a word at a time into the first row of `spare`: a cell is on where the
+        // code's bit for its west neighbour, itself and its east neighbour is.
+        for k in 0..<self.stride
+            val here = self.row_word(self.front, k)
+            val west = self.west(self.front, k, here)
+            val east = self.east(self.front, k, here)
+            var next: u64 = 0
+
+            for p in 0..<8
+                if (code >> u8(p)) & 1 == 1 then next |= pick(west, p, 2) & pick(here, p, 1) & pick(east, p, 0)
+
+            self.spare[usize(k)] = if k == self.stride - 1 then next & tail else next
+
+        if self.front == self.height - 1
+            for i in 0..<usize(self.stride * (self.height - 1))
+                self.cells[i] = self.cells[i + usize(self.stride)]
+        else
+            self.front += 1
+
+        for k in 0..<self.stride
+            self.cells[self.word_at(k, self.front)] = self.spare[usize(k)]
+    end step_wolfram
 
     // Word `k` of row `y`, with the row wrapped on a torus and an empty row beyond a bounded edge.
     private row_word(self, y: int, k: int) -> u64
@@ -337,7 +461,7 @@ grid(width: int, height: int, edges: Edges) -> Grid
     val cells = usize(width * height)
 
     Grid(width, height, edges, stride, buf_filled(words, 0), buf_filled(words, 0), buf_filled(cells, 0),
-         buf_filled(cells, 0), false)
+         buf_filled(cells, 0), false, -1)
 
 // `x` reduced into `0..<n`, for a negative `x` as well.
 wrap(x: int, n: int) -> int = ((x % n) + n) % n
