@@ -1,0 +1,262 @@
+@tests
+
+// Coloured Life — Immigration and QuadLife, run from LifeWiki's rule files. Each file is checked against
+// coloured Life stepped directly, cell by cell, and against plain B3/S23 with the colours ignored.
+
+import sysl.buf.{Buf, buf, buf_filled}
+import sysl.rand.rng
+import sysl.text.{from_utf8, replace_all}
+
+private val IMMIGRATION = from_utf8(embed("rules/Immigration.rule")).unwrap()
+private val QUADLIFE = from_utf8(embed("rules/QuadLife.rule")).unwrap()
+private val IMMIGRATION_RLE = from_utf8(embed("patterns/immigration-soup.rle")).unwrap()
+private val QUADLIFE_RLE = from_utf8(embed("patterns/quadlife-soup.rle")).unwrap()
+
+private rule_of(text: string) -> RuleTable = parse_rule_file(text).unwrap()
+
+// The same rule with its expanded table thrown away, so the grid walks the tree.
+private walked(t: RuleTable) -> RuleTable = RuleTable(t.name, t.states, t.neighbourhood, buf(), t.colours, t.tree, t.root)
+
+// -- coloured Life, stepped directly -----------------------------------------------------------------
+
+// A torus of colours, 0 for a dead cell and 1 to `colours` for a live one.
+private struct World
+    width: int
+    height: int
+    colours: int
+    cells: Buf[int]
+
+private at(w: World, x: int, y: int) -> int = w.cells[usize(wrap(y, w.height) * w.width + wrap(x, w.width))]
+
+// The colour a cell is born with from its three parents: the one at least two of them have, or, with
+// four colours and all three different, the one none of them has. Two colours always have a majority.
+private born(a: int, b: int, c: int) -> int
+    if a == b || a == c then return a
+    if b == c then return b
+
+    10 - a - b - c
+
+// One generation of B3/S23 in colour: a survivor keeps its colour, and a birth takes its parents'.
+private step_world(w: World) -> World
+    var next = buf_filled(usize(w.width * w.height), 0)
+
+    for y in 0..<w.height
+        for x in 0..<w.width
+            var parents = [0, 0, 0]
+            var n = 0
+
+            for dy in -1..1
+                for dx in -1..1
+                    val c = at(w, x + dx, y + dy)
+
+                    if (dx != 0 || dy != 0) && c != 0
+                        if n < 3 then parents[usize(n)] = c
+                        n += 1
+
+            val me = at(w, x, y)
+            val i = usize(y * w.width + x)
+
+            if me != 0 && (n == 2 || n == 3)
+                next[i] = me
+            else if me == 0 && n == 3
+                next[i] = born(parents[0], parents[1], parents[2])
+
+    World(w.width, w.height, w.colours, next)
+
+private agrees(g: Grid, w: World) -> bool
+    for y in 0..<w.height
+        for x in 0..<w.width
+            if int(g.state(x, y)) != at(w, x, y) then return false
+
+    true
+
+// A random torus in which `percent` of the cells are live, each in a colour from 1 to `colours`, as a
+// world and as a grid holding the same states.
+private soup(width: int, height: int, colours: int, percent: int, seed: u64) -> (World, Grid)
+    var r = rng(seed, 3)
+    var cells = buf_filled(usize(width * height), 0)
+    var g = grid(width, height, Torus)
+
+    for y in 0..<height
+        for x in 0..<width
+            if int(r.below(100)) < percent
+                val c = 1 + int(r.below(u64(colours)))
+
+                cells[usize(y * width + x)] = c
+                g.set_state(x, y, u8(c))
+
+    (World(width, height, colours, cells), g)
+
+// The rule steps soups exactly as coloured Life does, every cell, for `gens` generations.
+private runs_as_reference(rule: Rule, colours: int, gens: int)
+    for seed in [1, 2, 3]
+        var (w, g) = soup(40, 32, colours, 40, u64(seed))
+
+        for gen in 0..<gens
+            w = step_world(w)
+            g.step(rule)
+            assert(agrees(g, w), s"seed ${seed}, generation ${gen + 1}")
+
+// The rule's live cells, colour aside, step exactly as B3/S23's do from the same layout.
+private live_as_life(rule: Rule, colours: int)
+    val life = parse_rule("B3/S23").unwrap()
+
+    for seed in [4, 5]
+        var (w, g) = soup(50, 40, colours, 35, u64(seed))
+        var bits = grid(50, 40, Torus)
+
+        for y in 0..<40
+            for x in 0..<50
+                bits.set(x, y, g.state(x, y) != 0)
+
+        for gen in 0..<200
+            g.step(rule)
+            bits.step(life)
+
+            for y in 0..<40
+                for x in 0..<50
+                    assert_eq(g.state(x, y) != 0, bits.get(x, y), s"seed ${seed}, generation ${gen + 1}, (${x}, ${y})")
+
+        assert_eq(g.population(), bits.population())
+
+// What a dead cell at the centre of a bounded 5 by 5 grid becomes with three parents above it in these
+// colours.
+private child(rule: Rule, a: int, b: int, c: int) -> int
+    var g = grid(5, 5, Bounded)
+
+    g.set_state(1, 1, u8(a))
+    g.set_state(2, 1, u8(b))
+    g.set_state(3, 1, u8(c))
+    g.step(rule)
+    int(g.state(2, 2))
+
+// -- reading -----------------------------------------------------------------------------------------
+
+@test("Immigration.rule reads as a three-state Moore tree named Immigration, in Golly's colours for it")
+col_immigration_reads()
+    val t = rule_of(IMMIGRATION)
+
+    assert_eq(t.name, "Immigration")
+    assert_eq(t.states, 3)
+    assert(t.neighbourhood == Moore)
+    assert(t.tree.len() > 0)
+    assert_eq(t.colours[1], 0x00FF00)
+    assert_eq(t.colours[2], 0x2020FF)
+
+@test("QuadLife.rule reads as a five-state Moore tree named QuadLife, in red, green, blue and yellow")
+col_quadlife_reads()
+    val t = rule_of(QUADLIFE)
+
+    assert_eq(t.name, "QuadLife")
+    assert_eq(t.states, 5)
+    assert(t.neighbourhood == Moore)
+    assert(t.tree.len() > 0)
+    assert_eq(t.colours[1], 0xFF0000)
+    assert_eq(t.colours[2], 0x00FF00)
+    assert_eq(t.colours[3], 0x0000FF)
+    assert_eq(t.colours[4], 0xFFFF00)
+
+// -- against the reference ---------------------------------------------------------------------------
+
+@test("Immigration steps mixed soups exactly as two-colour Life does, every cell, 150 generations")
+col_immigration_reference()
+    runs_as_reference(Table(rule_of(IMMIGRATION)), 2, 150)
+
+@test("QuadLife steps mixed soups exactly as four-colour Life does, every cell, 150 generations")
+col_quadlife_reference()
+    runs_as_reference(Table(rule_of(QUADLIFE)), 4, 150)
+
+@test("both rules step the same way with the tree walked rather than expanded")
+col_walked_reference()
+    runs_as_reference(Table(walked(rule_of(IMMIGRATION))), 2, 20)
+    runs_as_reference(Table(walked(rule_of(QUADLIFE))), 4, 20)
+
+@test("Immigration's live cells, colour aside, are exactly B3/S23's for 200 generations")
+col_immigration_is_life()
+    live_as_life(Table(rule_of(IMMIGRATION)), 2)
+
+@test("QuadLife's live cells, colour aside, are exactly B3/S23's for 200 generations")
+col_quadlife_is_life()
+    live_as_life(Table(rule_of(QUADLIFE)), 4)
+
+// -- births worked by hand ---------------------------------------------------------------------------
+
+@test("an Immigration birth takes the colour two of its three parents have, wherever they stand")
+col_immigration_births()
+    val rule = Table(rule_of(IMMIGRATION))
+
+    assert_eq(child(rule, 1, 1, 2), 1)
+    assert_eq(child(rule, 2, 1, 1), 1)
+    assert_eq(child(rule, 2, 1, 2), 2)
+    assert_eq(child(rule, 1, 2, 2), 2)
+    assert_eq(child(rule, 1, 1, 1), 1)
+    assert_eq(child(rule, 2, 2, 2), 2)
+
+@test("a QuadLife birth takes its parents' majority colour, or the fourth when all three differ")
+col_quadlife_births()
+    val rule = Table(rule_of(QUADLIFE))
+
+    assert_eq(child(rule, 3, 1, 3), 3)
+    assert_eq(child(rule, 4, 4, 2), 4)
+    assert_eq(child(rule, 1, 2, 3), 4)
+    assert_eq(child(rule, 3, 2, 1), 4)
+    assert_eq(child(rule, 2, 3, 4), 1)
+    assert_eq(child(rule, 1, 3, 4), 2)
+    assert_eq(child(rule, 4, 1, 2), 3)
+
+@test("a survivor keeps its own colour whatever colours its neighbours are")
+col_survivors()
+    for (text, me, other) in [(IMMIGRATION, 1, 2), (QUADLIFE, 3, 1)]
+        var g = grid(5, 5, Bounded)
+
+        // A block: every cell has three live neighbours, and one is a colour the other three are not.
+        g.set_state(1, 1, u8(me))
+        g.set_state(2, 1, u8(other))
+        g.set_state(1, 2, u8(other))
+        g.set_state(2, 2, u8(other))
+        g.step(Table(rule_of(text)))
+
+        assert_eq(int(g.state(1, 1)), me)
+        assert_eq(int(g.state(2, 2)), other)
+        assert_eq(g.population(), 4)
+
+// -- the bundled patterns ----------------------------------------------------------------------------
+
+@test("each bundled soup names its rule, uses every colour the rule has and no other state")
+col_patterns()
+    for (text, rule, colours) in [(IMMIGRATION_RLE, "Immigration", 2), (QUADLIFE_RLE, "QuadLife", 4)]
+        val p = parse_rle(text).unwrap()
+        var seen = [false, false, false, false, false]
+
+        assert_eq(p.rule_name, rule)
+        assert_eq(int(p.most_state()), colours)
+
+        for i in 0..<p.live.len()
+            seen[usize(p.live[i].state)] = true
+
+        for c in 1..colours
+            assert(seen[usize(c)], s"${rule}: colour ${c}")
+
+@test("a soup is refused under a rule without its colours, without its rule file, and when damaged")
+col_pattern_errors()
+    val immigration = parse_rle(IMMIGRATION_RLE).unwrap()
+    val quad = parse_rle(QUADLIFE_RLE).unwrap()
+
+    assert(rule_file("rules/QuadLife.rule", "", immigration).is_ok())
+    assert(rule_file("rules/Immigration.rule", "", quad).unwrap_err().contains("state 4, and Immigration's states are 0 to 2"))
+    assert(rule_file("rules/Life.rule", "", immigration).unwrap_err().contains("state 2, and Life's states are 0 to 1"))
+    assert(rule_file("rules/Immigration.rule", "B3/S23", immigration).unwrap_err().contains("give one"))
+    assert(chosen_rule("", quad).unwrap_err().contains("rule is `QuadLife`, which is a rule file's name"))
+    assert(chosen_rule("", immigration).unwrap_err().contains("rule is `Immigration`"))
+
+    val cases = [
+        (replace_all(QUADLIFE_RLE, "2BC!", "2BC"), "the pattern ends without its closing `!`"),
+        (replace_all(QUADLIFE_RLE, "x = 24", "x = 20"), "wider than the header's x = 20"),
+        (replace_all(IMMIGRATION_RLE, "y = 24", "y = 23"), "more rows than the header's y = 23"),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says) = cases[i]
+        val d = parse_rle(text).unwrap_err()
+
+        assert(d.message.contains(says), s"case ${i}: ${d.message}")

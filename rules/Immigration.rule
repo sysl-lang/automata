@@ -1,0 +1,100 @@
+@RULE Immigration
+
+Immigration: Life (B3/S23) in two colours, states 1 and 2. A survivor keeps its colour, and a cell
+born takes the colour most of its three parents have.
+
+From LifeWiki's Rule:Immigration (https://conwaylife.com/wiki/Rule:Immigration), last edited
+19 December 2019. LifeWiki's content is available under the GNU Free Documentation License 1.2
+(https://www.gnu.org/licenses/old-licenses/fdl-1.2.html), and this file is distributed under those
+terms, not ISC. It is LifeWiki's file unchanged except for this description; the link below
+is the file's own, to the forum post it came from. Golly does not ship this rule.
+
+https://conwaylife.com/forums/viewtopic.php?p=20043#p20044
+
+@TREE
+
+num_states=3
+num_neighbors=8
+num_nodes=56
+1 0 0 0
+2 0 0 0
+1 0 1 2
+2 0 2 2
+3 1 3 3
+1 1 1 2
+2 2 5 5
+1 2 1 2
+2 2 5 7
+3 3 6 8
+2 2 7 7
+3 3 8 10
+4 4 9 11
+2 5 0 0
+3 6 13 13
+2 7 0 0
+3 8 13 15
+4 9 14 16
+3 10 15 15
+4 11 16 18
+5 12 17 19
+3 13 1 1
+4 14 21 21
+3 15 1 1
+4 16 21 23
+5 17 22 24
+4 18 23 23
+5 19 24 26
+6 20 25 27
+3 1 1 1
+4 21 29 29
+5 22 30 30
+4 23 29 29
+5 24 30 32
+6 25 31 33
+5 26 32 32
+6 27 33 35
+7 28 34 36
+4 29 29 29
+5 30 38 38
+6 31 39 39
+5 32 38 38
+6 33 39 41
+7 34 40 42
+6 35 41 41
+7 36 42 44
+8 37 43 45
+5 38 38 38
+6 39 47 47
+7 40 48 48
+6 41 47 47
+7 42 48 50
+8 43 49 51
+7 44 50 50
+8 45 51 53
+9 46 52 54
+
+@TABLE
+n_states:3
+neighborhood:Moore
+symmetries:permute
+var all1={0,1,2}
+var all2={all1}
+var all3={all1}
+var all4={all1}
+var all5={all1}
+var all6={all1}
+var all7={all1}
+var all8={all1}
+var all9={all1}
+var a={1,2}
+var b={a}
+var c={a}
+var d={a}
+a,b,c,0,0,0,0,0,0,a
+a,b,c,d,0,0,0,0,0,a
+0,a,a,b,0,0,0,0,0,a
+all1,all2,all3,all4,all5,all6,all7,all8,all9,0
+@COLORS
+0  48  48  48
+1   0 255   0
+2  32  32 255

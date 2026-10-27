@@ -319,6 +319,22 @@ sysl run . -- --rule-file rules/LangtonsAnt_LLRR.rule --pattern patterns/langton
 sysl run . -- --rule-file rules/Turmite_180121020081.rule --pattern patterns/turmite.rle
 ```
 
+### Coloured Life: Immigration and QuadLife
+
+Immigration and QuadLife are Life, B3/S23, with colours: a survivor keeps its colour and a cell born
+takes the colour most of its three parents have — in QuadLife, when all three differ, the fourth
+colour. They run from LifeWiki's rule files, `rules/Immigration.rule` (3 states) and
+`rules/QuadLife.rule` (5), as ordinary rule trees, so on a torus as every rule table does, and in
+the colours their `@COLORS` give. The tests step both against coloured Life worked out cell by cell
+over mixed soups, check that their live cells, colour aside, are exactly B3/S23's, and check births
+worked by hand: a two-to-one majority, and in QuadLife three different parents giving the fourth.
+`patterns/` has a 24 × 24 soup for each.
+
+```
+sysl run . -- --rule-file rules/Immigration.rule --pattern patterns/immigration-soup.rle
+sysl run . -- --rule-file rules/QuadLife.rule --pattern patterns/quadlife-soup.rle
+```
+
 ## Patterns
 
 RLE as Golly and LifeWiki write it: `#` lines (`#N` names the pattern), the `x = , y = , rule =`
@@ -367,4 +383,7 @@ ISC — see `LICENSE`. `patterns/bosco.rle`, `patterns/majority.rle` and `patter
 `rules/Langtons-Ant.rule`, `rules/LangtonsAnt_LLRR.rule` and `rules/Turmite_180121020081.rule` are
 Golly's own files, unchanged but for a description naming their source; Golly is Copyright © 2005–2026
 The Golly Gang and free software under the GNU General Public License, version 2 or later, and these
-three files are distributed under those terms, not ISC.
+three files are distributed under those terms, not ISC. `rules/Immigration.rule` and
+`rules/QuadLife.rule` are LifeWiki's (`Rule:Immigration` and `Rule:QuadLife` at conwaylife.com),
+unchanged but for a description naming their source; LifeWiki's content is available under the GNU
+Free Documentation License 1.2, and these two files are distributed under those terms, not ISC.
