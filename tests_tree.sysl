@@ -1,0 +1,384 @@
+@tests
+
+// Golly rule trees, checked against what they did not compute themselves: each tree here is either
+// bundled or built from a transition function by a generator in this file, and the grid it steps is
+// compared with that function applied cell by cell, its neighbours found from offsets written out
+// below rather than from the reader's own order.
+
+import sysl.buf.{Buf, buf, buf_filled}
+import sysl.container.{Map, map}
+import sysl.rand.{Rng, rng}
+import sysl.text.from_utf8
+
+private val LIFE_TREE = from_utf8(embed("rules/LifeTree.rule")).unwrap()
+private val SWIRL = from_utf8(embed("rules/Swirl.rule")).unwrap()
+private val LIFE_TABLE = from_utf8(embed("rules/Life.rule")).unwrap()
+private val WIREWORLD_TABLE = from_utf8(embed("rules/WireWorld.rule")).unwrap()
+
+private rule_of(text: string) -> RuleTable = parse_rule_file(text).unwrap()
+
+// The same rule with its expanded table thrown away, so the grid walks the tree.
+private walked(t: RuleTable) -> RuleTable = RuleTable(t.name, t.states, t.neighbourhood, buf(), t.colours, t.tree, t.root)
+
+// Each neighbour's offset, in Golly's tree order: NW, NE, SW, SE, N, W, E, S; or N, W, E, S.
+private offsets(neighbours: int) -> [](int, int) =
+    if neighbours == 8 then [(-1, -1), (1, -1), (-1, 1), (1, 1), (0, -1), (-1, 0), (1, 0), (0, 1)]
+    else [(0, -1), (-1, 0), (1, 0), (0, 1)]
+
+// -- the generator -----------------------------------------------------------------------------------
+
+private struct Builder
+    states: int
+    lines: Buf[string]
+    seen: Map[string, int]
+    // The variables fixed so far, in tree order: the neighbours, then the cell.
+    vals: Buf[int]
+    f: &Fn([]int) -> int
+
+// The node at `depth` under the variables already fixed, built once however often it recurs.
+private grow(b: *Builder, depth: int) -> int
+    val at = usize(int(b.vals.len()) - depth)
+    val f = b.f
+    var line = s"${depth}"
+
+    for v in 0..<b.states
+        b.vals[at] = v
+
+        val child = if depth == 1 then f(b.vals.view()) else grow(b, depth - 1)
+
+        line = s"${line} ${child}"
+
+    b.seen.get(line) match
+        Some(i) -> i
+        None ->
+            b.seen.put(line, int(b.lines.len()))
+            b.lines.push(line)
+            int(b.lines.len()) - 1
+
+// A @TREE section that answers as `f` does, `f` reading its variables in tree order.
+private tree_section(states: int, neighbours: int, f: &Fn([]int) -> int) -> string
+    var b = Builder(states, buf(), map(), buf_filled(usize(neighbours + 1), 0), f)
+
+    grow(&b, neighbours + 1)
+
+    var out = s"@TREE\nnum_states=${states}\nnum_neighbors=${neighbours}\nnum_nodes=${b.lines.len()}\n"
+
+    for line in b.lines
+        out = s"${out}${line}\n"
+
+    out
+
+private built(states: int, neighbours: int, f: &Fn([]int) -> int) -> RuleTable =
+    rule_of(s"@RULE Built\n${tree_section(states, neighbours, f)}")
+
+// -- the rules ---------------------------------------------------------------------------------------
+
+private life(v: []int) -> int
+    var n = 0
+
+    for i in 0..<8
+        n += v[i]
+
+    if n == 3 || (v[8] == 1 && n == 2) then 1 else 0
+
+// Swirl, the Generations rule 23/34/8, as Generations rules are defined: only state 1 is counted.
+private swirl(v: []int) -> int
+    var n = 0
+
+    for i in 0..<8
+        if v[i] == 1 then n += 1
+
+    val c = v[8]
+
+    if c == 0
+        if n == 3 || n == 4 then 1 else 0
+    elif c == 1
+        if n == 2 || n == 3 then 1 else 2
+    else
+        (c + 1) % 8
+
+// `v`, in tree order, rearranged as `RuleTable.lookup` takes it: the cell, then the ring.
+private as_table(v: []int, neighbours: int, hood: Neighbourhood) -> Buf[int]
+    val ring = hood.ring()
+    val tree = offsets(neighbours)
+    val out: Buf[int] = buf_filled(usize(neighbours + 1), 0)
+
+    out[0] = v[usize(neighbours)]
+
+    for i in 0..<tree.len
+        for j in 0..<ring.len
+            if ring[j] == tree[i] then out[j + 1] = v[i]
+
+    out
+
+private bs_life() -> Rule = parse_rule("B3/S23").unwrap()
+
+// -- the oracle --------------------------------------------------------------------------------------
+
+// One generation of `f` worked out cell by cell.
+private oracle(g: Grid, neighbours: int, f: &Fn([]int) -> int) -> Grid
+    val ring = offsets(neighbours)
+    var out = grid(g.width, g.height, g.edges)
+    val vals: Buf[int] = buf_filled(usize(neighbours + 1), 0)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            for i in 0..<ring.len
+                val (dx, dy) = ring[i]
+
+                vals[i] = int(g.state(x + dx, y + dy))
+
+            vals[usize(neighbours)] = int(g.state(x, y))
+            out.set_state(x, y, u8(f(vals.view())))
+
+    out
+
+private same_states(a: Grid, b: Grid) -> bool
+    for y in 0..<a.height
+        for x in 0..<a.width
+            if a.state(x, y) != b.state(x, y) then return false
+
+    true
+
+private random(r: *Rng, width: int, height: int, edges: Edges, states: int) -> Grid
+    var g = grid(width, height, edges)
+
+    for y in 0..<height
+        for x in 0..<width
+            g.set_state(x, y, u8(r.below(u64(states))))
+
+    g
+
+// `t`, expanded and walked, against `f` over random grids of every shape on both edges.
+private agrees(t: RuleTable, neighbours: int, f: &Fn([]int) -> int, seed: u64, generations: int)
+    val widths = [1, 2, 7, 64, 65]
+    val heights = [1, 3, 17]
+    var r = rng(seed, 9)
+
+    for w in 0..<widths.len
+        for h in 0..<heights.len
+            for e in [Torus, Bounded]
+                var expect = random(&r, widths[w], heights[h], e, t.states)
+                var fast = copy_of(expect)
+                var slow = copy_of(expect)
+
+                for gen in 0..<generations
+                    expect = oracle(expect, neighbours, f)
+                    fast.step(Table(t))
+                    slow.step(Table(walked(t)))
+                    assert(same_states(fast, expect), s"expanded, ${widths[w]}x${heights[h]}, generation ${gen}")
+                    assert(same_states(slow, expect), s"walked, ${widths[w]}x${heights[h]}, generation ${gen}")
+
+private copy_of(g: Grid) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            out.set_state(x, y, g.state(x, y))
+
+    out
+
+// -- Life as a tree ----------------------------------------------------------------------------------
+
+@test("LifeTree.rule steps random grids exactly as B3/S23 does, expanded and walked, every width, both edges")
+tre_life_matches_bs()
+    val t = rule_of(LIFE_TREE)
+    val widths = [1, 2, 5, 63, 64, 65, 130]
+    val heights = [1, 3, 23]
+    var r = rng(21, 5)
+
+    for w in 0..<widths.len
+        for h in 0..<heights.len
+            for e in [Torus, Bounded]
+                var bits = grid(widths[w], heights[h], e)
+
+                bits.randomize(&r, 40)
+
+                var fast = copy_of(bits)
+                var slow = copy_of(bits)
+
+                for gen in 0..<40
+                    bits.step(bs_life())
+                    fast.step(Table(t))
+                    slow.step(Table(walked(t)))
+                    assert(fast.same_cells(bits))
+                    assert(slow.same_cells(bits))
+
+@test("LifeTree.rule runs the Gosper gun 200 generations exactly as B3/S23 does, on both edges")
+tre_life_gun()
+    val t = rule_of(LIFE_TREE)
+
+    for e in [Torus, Bounded]
+        var bits = grid(90, 60, e)
+        var slow = grid(90, 60, e)
+        val gun = parse_rle(GOSPER_GUN).unwrap()
+
+        gun.stamp(&bits, 2, 2)
+        gun.stamp(&slow, 2, 2)
+
+        val start = bits.population()
+
+        for gen in 0..<200
+            bits.step(bs_life())
+            slow.step(Table(walked(t)))
+            assert(slow.same_cells(bits))
+
+        assert(slow.population() > start)
+
+@test("LifeTree.rule reads as a 32-node Moore tree whose expansion is Life.rule's table entry for entry")
+tre_life_reads()
+    val t = rule_of(LIFE_TREE)
+
+    assert_eq(t.name, "LifeTree")
+    assert_eq(t.states, 2)
+    assert(t.neighbourhood == Moore)
+    assert_eq(t.tree.len(), usize(64))
+    assert_eq(t.root, 62)
+    assert_eq(t.next.len(), usize(512))
+    assert(t.next == rule_of(LIFE_TABLE).next)
+    assert_eq(t.colours[1], u32(0xFF0000))
+
+@test("the bundled LifeTree.rule is the tree this file's generator builds from B3/S23")
+tre_life_generated()
+    assert(built(2, 8, life).tree == rule_of(LIFE_TREE).tree)
+
+// -- the order of the neighbours ---------------------------------------------------------------------
+
+@test("a tree that copies one neighbour moves a cell the opposite way, for every Moore and von Neumann neighbour")
+tre_order()
+    // Where a lone cell at (2, 2) of a 5×5 grid is after one step of "become neighbour k's state":
+    // the cell whose k-th neighbour it is.
+    copies(8, [(3, 3), (1, 3), (3, 1), (1, 1), (2, 3), (3, 2), (1, 2), (2, 1), (2, 2)])
+    copies(4, [(2, 3), (3, 2), (1, 2), (2, 1), (2, 2)])
+
+private copies(neighbours: int, at: [](int, int))
+    for k in 0..<at.len
+        val t = built(3, neighbours, v -> v[k])
+
+        for rule in [t, walked(t)]
+            var g = grid(5, 5, Bounded)
+
+            g.set_state(2, 2, 2)
+            g.step(Table(rule))
+
+            val (x, y) = at[k]
+
+            assert_eq(g.state(x, y), 2, s"${neighbours} neighbours, k = ${k}")
+            assert_eq(g.population(), 1, s"${neighbours} neighbours, k = ${k}")
+
+        agrees(t, neighbours, v -> v[k], u64(k + 1), 3)
+
+@test("a three-state von Neumann tree that weighs each neighbour differently steps as its function does")
+tre_von_neumann()
+    val f = (v: []int) -> (v[4] + v[0] + 2 * v[1] + v[2] * v[3]) % 3
+    val t = built(3, 4, f)
+
+    assert(t.neighbourhood == VonNeumann)
+    assert_eq(t.next.len(), usize(243))
+    agrees(t, 4, f, 31, 12)
+
+// -- WireWorld, and more states than a table holds ---------------------------------------------------
+
+@test("WireWorld built as a tree from WireWorld.rule expands to the same table, and steps as it does")
+tre_wireworld()
+    val table = rule_of(WIREWORLD_TABLE)
+    val f = (v: []int) -> int(table.lookup(as_table(v, 8, Moore).view()))
+    val t = built(4, 8, f)
+
+    assert(t.next == table.next)
+    agrees(t, 8, f, 41, 10)
+
+@test("Swirl.rule's eight states are too many to expand, and its walked tree steps as Generations 23/34/8 does")
+tre_swirl()
+    val t = rule_of(SWIRL)
+
+    assert_eq(t.name, "Swirl")
+    assert_eq(t.states, 8)
+    assert_eq(t.next.len(), usize(0))
+    assert_eq(t.colours.len(), usize(8))
+    agrees(t, 8, swirl, 51, 25)
+
+@test("a lone Swirl cell dies through every dying state in turn and is gone after the seventh")
+tre_swirl_dying()
+    val t = Table(rule_of(SWIRL))
+    var g = grid(5, 5, Torus)
+
+    g.set_state(2, 2, 1)
+
+    for state in [2, 3, 4, 5, 6, 7, 0]
+        g.step(t)
+        assert_eq(int(g.state(2, 2)), state)
+        assert_eq(g.population(), if state == 0 then 0 else 1)
+
+// -- precedence and colours --------------------------------------------------------------------------
+
+@test("of a @TABLE and a @TREE, the one that comes first is the rule, and the other is not read")
+tre_precedence()
+    val life_tree = tree_section(2, 8, life)
+    val tree_first = rule_of(s"@RULE P\n${life_tree}@TABLE\nn_states:3\nneighborhood:Moore\nnonsense\n")
+
+    assert_eq(tree_first.states, 2)
+    assert(tree_first.tree == rule_of(LIFE_TREE).tree)
+
+    val table_first = rule_of(s"${WIREWORLD_TABLE}\n${life_tree}num_states=999\n")
+
+    assert_eq(table_first.states, 4)
+    assert_eq(table_first.tree.len(), usize(0))
+    assert(table_first.next == rule_of(WIREWORLD_TABLE).next)
+
+@test("@COLORS colours a tree's states, before or after the @TREE")
+tre_colours()
+    val section = tree_section(3, 4, v -> v[4])
+    val after = rule_of(s"@RULE C\n${section}@COLORS\n2 10 20 30\n")
+    val before = rule_of(s"@RULE C\n@COLORS\n2 10 20 30\n${section}")
+
+    assert_eq(after.colours.len(), usize(3))
+    assert_eq(after.colours[1], u32(0xFF0000))
+    assert_eq(after.colours[2], u32(0x0A141E))
+    assert(before.colours == after.colours)
+
+// -- refusals ----------------------------------------------------------------------------------------
+
+@test("a malformed tree is refused with a diagnostic at the place it went wrong")
+tre_errors()
+    val head = "@RULE X\n@TREE\n"
+    val von = s"${head}num_states=2\nnum_neighbors=4\n"
+    val cases = [
+        (s"${head}num_states=1\n", "2 to 256 states", 25),
+        (s"${head}num_states=300\n", "2 to 256 states", 25),
+        (s"${head}num_states=x\n", "expected a number", 25),
+        (s"${head}num_states 2\n", "expected `=` after `num_states`", 25),
+        (s"${head}num_states=2 x\n", "unexpected text", 27),
+        (s"${head}num_states=2\nnum_states=3\n", "a second `num_states=`", 27),
+        (s"${head}num_neighbors=6\n", "4 neighbours (von Neumann) or 8", 28),
+        (s"${head}num_nodes=0\n", "at least its root", 24),
+        (s"${head}num_cells=2\n", "unknown setting `num_cells=`", 14),
+        (s"${head}-1 0\n", "expected a setting", 14),
+        (s"${head}", "the tree has no `num_states=`", 8),
+        (s"${head}num_states=2\n", "the tree has no `num_neighbors=`", 8),
+        (s"${von}1 0 1\n", "`num_nodes=` must be given before the first node", 43),
+        (s"${head}num_states=256\nnum_neighbors=8\nnum_nodes=100000\n1 0\n", "more than this reader holds", 55),
+        (s"${von}num_nodes=3\n1 0 1\nnum_states=2\n", "must come before the first node", 61),
+        (s"${von}num_nodes=1\n1 0 1\n1 1 0\n", "this is one node more", 61),
+        (s"${von}num_nodes=1\n6 0 1\n", "depth is 1 to 5 for 4 neighbours, not 6", 55),
+        (s"${von}num_nodes=1\n0 0 1\n", "not 0", 55),
+        (s"${von}num_nodes=1\n1 0 2\n", "there is no state 2", 59),
+        (s"${von}num_nodes=1\n1 0\n", "this one has 1", 58),
+        (s"${von}num_nodes=1\n1 0 1 1\n", "this one has more", 61),
+        (s"${von}num_nodes=1\n1 0,1\n", "expected a number", 58),
+        (s"${von}num_nodes=2\n1 0 1\n2 0 1\n", "node 1 is not defined yet", 65),
+        (s"${von}num_nodes=3\n1 0 1\n2 0 0\n3 0 1\n", "node 0 is at depth 1, and a node at depth 3", 69),
+        (s"${von}num_nodes=2\n1 0 1\n", "num_nodes is 2, and the tree has 1", 53),
+        (s"${von}num_nodes=2\n1 0 1\n1 1 0\n", "the last node is the root, at depth 5", 61),
+        (s"${von}num_nodes=6\n1 0 1\n2 0 0\n3 1 1\n4 2 2\n5 3 3\n5 3 3\n", "a second node at depth 5", 85),
+        ("@RULE X\n@TREE\n@TREE\n", "a second @TREE", 14),
+        ("@RULE X\nn_states:2\n", "no @TABLE or @TREE section", 19),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rule_file(text).unwrap_err()
+
+        assert(d.message.contains(says), s"case ${i}: ${d.message}")
+        assert_eq(d.span.start, usize(at), s"case ${i}: ${d.message}")
+end tre_errors

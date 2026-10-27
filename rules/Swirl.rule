@@ -1,0 +1,52 @@
+@RULE Swirl
+
+Swirl, the Generations rule 23/34/8: a live cell (state 1) with two or three live neighbours
+stays live, and one with any other count starts to die; a dying cell (states 2 to 7) moves one
+state on each generation and back to 0 after 7; a dead cell with three or four live neighbours
+is born. Only live cells are counted. Eight states make 8^9 neighbourhoods, too many to expand
+into a table, which is what a tree is for.
+
+@TREE
+
+# Written for automata from Golly's rule format (https://golly.sourceforge.io/Help/formats.html#rule),
+# variables in Golly's order NW, NE, SW, SE, N, W, E, S, C, and equal nodes shared.
+
+num_states=8
+num_neighbors=8
+num_nodes=36
+1 0 2 3 4 5 6 7 0
+2 0 0 0 0 0 0 0 0
+1 0 1 3 4 5 6 7 0
+2 0 2 0 0 0 0 0 0
+3 1 3 1 1 1 1 1 1
+1 1 1 3 4 5 6 7 0
+2 2 5 2 2 2 2 2 2
+3 3 6 3 3 3 3 3 3
+4 4 7 4 4 4 4 4 4
+1 1 2 3 4 5 6 7 0
+2 5 9 5 5 5 5 5 5
+3 6 10 6 6 6 6 6 6
+4 7 11 7 7 7 7 7 7
+5 8 12 8 8 8 8 8 8
+2 9 0 9 9 9 9 9 9
+3 10 14 10 10 10 10 10 10
+4 11 15 11 11 11 11 11 11
+5 12 16 12 12 12 12 12 12
+6 13 17 13 13 13 13 13 13
+3 14 1 14 14 14 14 14 14
+4 15 19 15 15 15 15 15 15
+5 16 20 16 16 16 16 16 16
+6 17 21 17 17 17 17 17 17
+7 18 22 18 18 18 18 18 18
+3 1 1 1 1 1 1 1 1
+4 19 24 19 19 19 19 19 19
+5 20 25 20 20 20 20 20 20
+6 21 26 21 21 21 21 21 21
+7 22 27 22 22 22 22 22 22
+8 23 28 23 23 23 23 23 23
+4 24 24 24 24 24 24 24 24
+5 25 30 25 25 25 25 25 25
+6 26 31 26 26 26 26 26 26
+7 27 32 27 27 27 27 27 27
+8 28 33 28 28 28 28 28 28
+9 29 34 29 29 29 29 29 29

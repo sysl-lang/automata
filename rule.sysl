@@ -18,8 +18,8 @@ enum Rule
     // An isotropic non-totalistic rule: what a cell becomes depends on its own state and on the
     // arrangement its live neighbours make, up to rotation and reflection.
     Isotropic(rule: Hensel)
-    // A rule table read from a Golly `.rule` file: any number of states up to what its expanded
-    // table holds, on a Moore or von Neumann neighbourhood.
+    // A rule read from a Golly `.rule` file, as a table or a tree: up to 256 states, on a Moore or
+    // von Neumann neighbourhood.
     Table(table: RuleTable)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
@@ -39,7 +39,7 @@ enum Rule
             (Isotropic(h1), Isotropic(h2)) -> h1.birth == h2.birth && h1.survive == h2.survive
             (LifeLike(b, s), Isotropic(h)) -> set_of(b) == h.birth && set_of(s) == h.survive
             (Isotropic(h), LifeLike(b, s)) -> set_of(b) == h.birth && set_of(s) == h.survive
-            (Table(t1), Table(t2)) -> t1.name == t2.name && t1.states == t2.states && t1.next == t2.next
+            (Table(t1), Table(t2)) -> t1.name == t2.name && t1.states == t2.states && t1.next == t2.next && t1.tree == t2.tree
             _ -> false
 end Rule
 

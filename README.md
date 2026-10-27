@@ -52,7 +52,7 @@ sysl run . -- --rule-file rules/Life.rule --pattern 4
 ```
 
 `--rule-file` loads a rule in Golly's [`.rule` format](https://golly.sourceforge.io/Help/formats.html#rule).
-Of its sections, three are read:
+Of its sections, four are read:
 
 - **`@RULE`** names the rule, and the status line shows the name.
 - **`@TABLE`**: `n_states` (2 to 256), `neighborhood` (`Moore` or `vonNeumann`; `hexagonal` and
@@ -61,17 +61,29 @@ Of its sections, three are read:
   name earlier variables, and a variable written twice in one transition is the same state both
   times), and transitions with commas or as bare digits. The first matching transition wins; a cell
   none matches keeps its state.
+- **`@TREE`**: `num_states` (2 to 256), `num_neighbors` (8 for Moore, 4 for von Neumann),
+  `num_nodes`, and the node lines `depth child…`, looked up in Golly's order — NW, NE, SW, SE, N, W,
+  E, S, then the cell, or N, W, E, S, then the cell — with the root last. Every node's depth, child
+  count, child numbers and states are checked. A file with both a `@TABLE` and a `@TREE` runs the
+  one that comes first, as Golly does.
 - **`@COLORS`**: `state r g b` lines and six-number gradient lines, over Golly's default red-to-yellow
   gradient.
 
-Every other section — `@TREE`, `@ICONS`, `@NAMES` — is skipped, as Golly skips one it does not know,
-and a file whose rule is only a `@TREE` is refused. A malformed file is refused with a diagnostic at
-its line and column. The table is expanded once, when the file is read, into an array indexed by a
-cell's state and its neighbours', so a step is one lookup per cell; that limits a table to 2²⁴
-entries, which is up to 6 states for Moore and 27 for von Neumann.
+Every other section — `@ICONS`, `@NAMES` — is skipped, as Golly skips one it does not know. A
+malformed file is refused with a diagnostic at its line and column. A table is expanded once, when
+the file is read, into an array indexed by a cell's state and its neighbours', so a step is one
+lookup per cell; that limits a table to 2²⁴ entries, which is up to 6 states for Moore and 27 for
+von Neumann. A tree has no such limit: one that fits is expanded into the same array, and a larger
+one is walked for every cell, a step per neighbour.
 
-`rules/` holds `Life.rule` (Life as a `permute` table, which the tests run against B3/S23 bit for bit)
-and `WireWorld.rule`.
+`rules/` holds `Life.rule` (Life as a `permute` table, which the tests run against B3/S23 bit for
+bit), `LifeTree.rule` (Life as a tree, which expands to exactly `Life.rule`'s table), `WireWorld.rule`,
+and `Swirl.rule` (the eight-state Generations rule 23/34/8 as a tree — too many states for a table —
+checked against Generations worked out cell by cell).
+
+```
+sysl run . -- --rule-file rules/Swirl.rule --pattern 4
+```
 
 ## Patterns
 

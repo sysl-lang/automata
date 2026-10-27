@@ -1,0 +1,167 @@
+// Rule trees: the @TREE section of Golly's `.rule` format.
+//
+//     @TREE
+//     num_states=2
+//     num_neighbors=8
+//     num_nodes=32
+//     1 0 0
+//     2 0 0
+//     1 0 1
+//     2 0 2
+//     …
+//
+// A tree looks a neighbourhood up one cell at a time, in Golly's order — NW, NE, SW, SE, N, W, E, S
+// for eight neighbours, N, W, E, S for four, and the cell itself last. Each node branches on one of
+// them: the root, the last node in the file, on the first, and a node at depth 1 on the cell itself,
+// its children being the states the cell becomes. Node lines are `depth child…`, one child per
+// state, and a child above depth 1 is the number of an earlier node, counting from zero.
+//
+// **A tree has no size limit beyond its own nodes**, where a table expands to one entry per
+// neighbourhood: equal subtrees are written once, so a rule whose answer depends on little — how many
+// neighbours are live, say — stays small at any number of states.
+
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, is_ident_start, is_ident_cont}
+import sysl.buf.{Buf, buf}
+import sysl.slices.contains
+
+// A @TREE section as it is read: its settings, then its nodes.
+struct TreeReader
+    states: int
+    states_at: Span
+    neighbours: int
+    nodes: int
+    nodes_at: Span
+    // Each node's depth, in the order the file defines them.
+    depths: Buf[int]
+    // Each node's children, `states` apiece: at depth 1 the states the cell becomes, above it the
+    // index here where the child's own children begin.
+    children: Buf[int]
+    // The last node line, which must be the root's.
+    last: Span
+
+tree_reader() -> TreeReader = TreeReader(0, Span(0, 0), 0, 0, Span(0, 0), buf(), buf(), Span(0, 0))
+
+// One line of @TREE: a setting `name=value`, or a node.
+tree_line(t: *TreeReader, text: string, s: *Scanner) -> Result[unit, Diagnostic]
+    if s.peek().map(c -> c.is_digit()).unwrap_or(false) then return tree_node(t, s)
+
+    val start = s.offset
+    val w = s.read_ident(is_ident_start, is_ident_cont) match
+        Some(w) -> w
+        None -> return Err(error(Span(start, start + 1), "expected a setting `name=value` or a node `depth child…`"))
+    val key = text[w.start..<w.end]
+
+    s.skip_blanks()
+
+    if !s.accept(u8('=')) then return Err(error(s.here(), s"expected `=` after `${key}`"))
+
+    if t.depths.len() > 0 then return Err(error(w, s"`${key}=` must come before the first node"))
+
+    s.skip_blanks()
+
+    val m = s.mark()
+    val n = read_number(s)?
+    val at = s.span_from(m)
+
+    if key == "num_states"
+        if t.states != 0 then return Err(error(w, "a second `num_states=`"))
+
+        if n < 2 || n > 256 then return Err(error(at, s"num_states is ${n}; Golly's trees have 2 to 256 states"))
+
+        t.states = n
+        t.states_at = at
+    elif key == "num_neighbors"
+        if t.neighbours != 0 then return Err(error(w, "a second `num_neighbors=`"))
+
+        if n != 4 && n != 8 then return Err(error(at, s"num_neighbors is ${n}; a tree has 4 neighbours (von Neumann) or 8 (Moore)"))
+
+        t.neighbours = n
+    elif key == "num_nodes"
+        if t.nodes != 0 then return Err(error(w, "a second `num_nodes=`"))
+
+        if n < 1 then return Err(error(at, "num_nodes is 0; a tree has at least its root"))
+
+        t.nodes = n
+        t.nodes_at = at
+    else
+        return Err(error(w, s"unknown setting `${key}=`; a tree's settings are num_states, num_neighbors and num_nodes"))
+
+    end_of_line(s)
+end tree_line
+
+// `depth child…`: a node, numbered by its place among the node lines.
+private tree_node(t: *TreeReader, s: *Scanner) -> Result[unit, Diagnostic]
+    val start = s.offset
+    val m = s.mark()
+    val depth = read_number(s)?
+    val depth_at = s.span_from(m)
+
+    for (given, key) in [(t.states, "num_states"), (t.neighbours, "num_neighbors"), (t.nodes, "num_nodes")]
+        if given == 0 then return Err(error(depth_at, s"`${key}=` must be given before the first node"))
+
+    val index = int(t.depths.len())
+    val top = t.neighbours + 1
+
+    if index == 0 && t.nodes * t.states > MOST_ENTRIES
+        return Err(error(t.nodes_at, s"${t.nodes} nodes of ${t.states} children are more than this reader holds"))
+
+    if index == t.nodes then return Err(error(depth_at, s"num_nodes is ${t.nodes}, and this is one node more"))
+
+    if depth < 1 || depth > top
+        return Err(error(depth_at, s"a node's depth is 1 to ${top} for ${t.neighbours} neighbours, not ${depth}"))
+
+    if depth == top && contains(t.depths.view(), top)
+        return Err(error(depth_at, s"a second node at depth ${top}; the root is the only node at the top"))
+
+    for i in 0..<t.states
+        s.skip_blanks()
+
+        if s.at_end()
+            return Err(error(s.here(), s"a node is its depth and ${t.states} children, one per state; this one has ${i}"))
+
+        val c = s.mark()
+        val child = read_number(s)?
+        val at = s.span_from(c)
+
+        if depth == 1
+            if child >= t.states
+                return Err(error(at, s"there is no state ${child}: num_states is ${t.states}, so the states are 0 to ${t.states - 1}"))
+
+            t.children.push(child)
+        else
+            if child >= index then return Err(error(at, s"node ${child} is not defined yet; a node's children come before it"))
+
+            val below = t.depths[usize(child)]
+
+            if below != depth - 1
+                return Err(error(at, s"node ${child} is at depth ${below}, and a node at depth ${depth} has its children at depth ${depth - 1}"))
+
+            t.children.push(child * t.states)
+
+    s.skip_blanks()
+
+    if s.peek().map(c -> c.is_digit()).unwrap_or(false)
+        return Err(error(Span(s.offset, s.offset + 1), s"a node is its depth and ${t.states} children, one per state; this one has more"))
+
+    end_of_line(s)?
+    t.depths.push(depth)
+    t.last = Span(start, s.offset)
+    Ok(())
+end tree_node
+
+// The tree once its section has been read, `at` being its @TREE line: where the root's children
+// begin.
+finish_tree(t: TreeReader, at: Span) -> Result[int, Diagnostic]
+    for (given, key) in [(t.states, "num_states"), (t.neighbours, "num_neighbors"), (t.nodes, "num_nodes")]
+        if given == 0 then return Err(error(at, s"the tree has no `${key}=`"))
+
+    val count = int(t.depths.len())
+
+    if count < t.nodes then return Err(error(t.nodes_at, s"num_nodes is ${t.nodes}, and the tree has ${count}"))
+
+    val top = t.neighbours + 1
+    val root = t.depths[usize(count - 1)]
+
+    if root != top then return Err(error(t.last, s"the last node is the root, at depth ${top}; this one is at depth ${root}"))
+
+    Ok((count - 1) * t.states)
