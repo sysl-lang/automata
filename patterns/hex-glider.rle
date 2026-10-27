@@ -1,0 +1,8 @@
+#N B2/S34H glider
+#C A glider of hexagonal Life, B2/S34H, found by Peter Naszvadi in 2020: period 5, moving one cell
+#C west and one north every period on Golly's square-grid storage of the hexagonal lattice, and a
+#C glider in every rule from B2/S34H to B2/S3456H. From the HROT glider database,
+#C https://github.com/jedlimlx/HROT-Glider-DB, file R1-C2-NH-gliders.db.txt. Run with
+#C --pattern patterns/hex-glider.rle.
+x = 14, y = 9, rule = B2/S34H
+3bo$b2o$bo3bo$o2bo$5bo$bo2b2o3bo$5bo3bobo$10b2o$12b2o!

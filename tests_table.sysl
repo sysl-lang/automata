@@ -365,7 +365,7 @@ tbl_errors()
         (s"${head}n_states:300\n", "2 to 256 states", 24),
         (s"${head}n_states:x\n", "expected a number", 24),
         (s"${head}n_states:7\nneighborhood:Moore\n0,0,0,0,0,0,0,0,0,1\n", "too large", 24),
-        (s"${head}n_states:2\nneighborhood:hexagonal\n", "hexagonal neighbourhood is Golly's", 39),
+        (s"${head}n_states:2\nneighborhood:oneDimensional\n", "oneDimensional neighbourhood is Golly's", 39),
         (s"${head}n_states:2\nneighborhood:Hilbert\n", "unknown neighbourhood `Hilbert`", 39),
         (s"${head}n_states:2\nsymmetries:mirror\n", "unknown symmetries `mirror`", 37),
         (s"${head}symmetries:rotate8\nn_states:2\nneighborhood:vonNeumann\n0,0,0,0,0,1\n", "turns a Moore neighbourhood", 26),

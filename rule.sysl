@@ -8,6 +8,7 @@
 // the second such family.
 
 import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, read_digits, scanner_of}
+import sysl.math.min
 
 enum Rule
     // A Life-like rule: a cell's next state depends on its own state and on how many of its eight
@@ -15,6 +16,10 @@ enum Rule
     // bit `n` of `survive` says a live cell with `n` stays alive. Conway's Life is B3/S23: births
     // `{3}`, survivals `{2, 3}`.
     LifeLike(birth: u16, survive: u16)
+    // A B/S rule on Golly's hexagonal neighbourhood: the counts are of six neighbours, not eight. The
+    // grid stays square, as Golly keeps it, and a cell's six are its Moore neighbours without the
+    // north-east and south-west corners — see `HEX_WORDS` in `grid.sysl`.
+    Hex(birth: u16, survive: u16)
     // An isotropic non-totalistic rule: what a cell becomes depends on its own state and on the
     // arrangement its live neighbours make, up to rotation and reflection.
     Isotropic(rule: Hensel)
@@ -48,13 +53,16 @@ enum Rule
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
     // back to the same rule; Hensel or Larger than Life notation in Golly's canonical spelling;
     // Generations in Golly's survivals, births and states (`345/2/4`); `W` and the code; MCell's
-    // notation for MCell's families; or a table's name from its @RULE line.
+    // notation for MCell's families; or a table's name from its @RULE line. A hexagonal rule ends in
+    // Golly's `H` (`B2/S34H`, `3/2/3H`).
     notation(self) -> string
         self match
             LifeLike(b, s) -> s"B${counts(b)}/S${counts(s)}"
+            Hex(b, s) -> s"B${counts(b)}/S${counts(s)}H"
             Isotropic(h) -> h.notation()
             Table(t) -> t.name
-            Generations(g) -> s"${written(g.life.survive)}/${written(g.life.birth)}/${g.states}"
+            Generations(g) ->
+                s"${written(g.life.survive)}/${written(g.life.birth)}/${g.states}${if g.hex then "H" else ""}"
             Wolfram(code) -> s"W${code}"
             LargerThanLife(l) -> l.notation()
             Cyclic(c) -> c.notation()
@@ -74,11 +82,22 @@ enum Rule
             Weighted(w) -> w.states()
             BinaryLine(b) -> b.states()
             TotalisticLine(t) -> t.states()
-            LifeLike(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> 2
+            LifeLike(_, _) | Hex(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> 2
+
+    // Whether the rule counts Golly's six hexagonal neighbours.
+    hexagonal(self) -> bool
+        self match
+            Hex(_, _) -> true
+            Generations(g) -> g.hex
+            Table(t) -> t.neighbourhood == Hexagonal
+            _ -> false
 
     // Whether two rules make every cell the same: a B/S rule and the Hensel rule naming every
-    // arrangement of the same counts are one rule, and so is a Generations rule of two states.
+    // arrangement of the same counts are one rule, and so is a Generations rule of two states. A
+    // hexagonal rule and a Moore one never are.
     same(self, other: Rule) -> bool
+        if self.hexagonal() != other.hexagonal() then return false
+
         (two_state(self), two_state(other)) match
             (Some((b1, s1)), Some((b2, s2))) -> return b1 == b2 && s1 == s2
             _ -> ()
@@ -106,6 +125,8 @@ struct GenerationsRule
     // neighbours, and one with them by their arrangement.
     lettered: bool
     states: int
+    // Whether the counts are of Golly's six hexagonal neighbours rather than eight.
+    hex: bool
 
     // What a cell in `state` becomes, `next` being what `life` says of it: whether a dead cell is
     // born, whether a live one survives. A dying cell ignores it.
@@ -134,6 +155,7 @@ private cyclic_shaped(s: *Scanner) -> bool
 private two_state(r: Rule) -> Option[(u64, u64)] =
     r match
         LifeLike(b, s) -> Some((set_of(b), set_of(s)))
+        Hex(b, s) -> Some((set_of(b), set_of(s)))
         Isotropic(h) -> Some((h.birth, h.survive))
         Generations(g) -> if g.states == 2 then Some((g.life.birth, g.life.survive)) else None
         Vote(v) ->
@@ -171,6 +193,10 @@ private counts(mask: u16) -> string
 // `345/2/4`, MCell's survivals, births, states). Hensel letters may narrow its counts as anywhere else
 // (`B2-a/S12/C5`). **`W` and a number from 0 to 255 is a Wolfram code** (`W110`).
 //
+// **A final `H` makes a B/S or Generations rule hexagonal**, as in Golly (`B2/S34H`, `S34/B2H`,
+// `34/2H`, `B2/S34/C3H`, `34/2/3H`): its counts are of six neighbours, so none is above 6. Golly's
+// hexagonal letters (`B2o/S2m34H`) are refused, as are Hensel letters on a hexagonal rule.
+//
 // **MCell's families are told apart by how they begin** (see `mcell.sysl` and `mcell1d.sysl`): a
 // Weighted Life keyword (`NW1,…`, `RS2,…`) is Weighted Life, `MS,D…` is Margolus, `R` and a range
 // followed by `/` is a cyclic rule (`R1/T3/C3/NM`), and digits with no `/` are Vote for Life
@@ -206,8 +232,8 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
     if text.contains(",") || first == u8('R') || first == u8('r') then return parse_ltl(text).map(l -> LargerThanLife(l))
 
     if first.is_digit() && !text.contains("/") then return parse_vote(text).map(v -> Vote(v))
-    var birth = Half(0, false)
-    var survive = Half(0, false)
+    var birth = Half(0, false, None)
+    var survive = Half(0, false, None)
     // Whether the halves were introduced by `B` and `S`, so that a count of states is introduced by `C`.
     var named = true
 
@@ -243,11 +269,28 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
 
         states = read_states(&s)?
 
+    val hex_at = s.here()
+    val hex = s.accept(u8('H')) || s.accept(u8('h'))
+
     end_of_rule(&s)?
 
     val lettered = birth.lettered || survive.lettered
 
-    if states > 0 then return Ok(Generations(GenerationsRule(hensel(birth.set, survive.set), lettered, states)))
+    if hex
+        if lettered then return Err(error(hex_at, "a hexagonal rule is read by its counts alone, so its counts take no letters"))
+
+        // The first such count in the text, whichever half it is in.
+        val over = (birth.over_six, survive.over_six) match
+            (Some(b), Some(v)) -> Some(min(b, v))
+            (Some(b), None) -> Some(b)
+            (None, v) -> v
+
+        if over is Some(at)
+            return Err(error(Span(at, at + 1), s"a hexagonal cell has 6 neighbours, so ${char(text[at])} cannot be a count"))
+
+        if states == 0 then return Ok(Hex(counts_of(birth.set), counts_of(survive.set)))
+
+    if states > 0 then return Ok(Generations(GenerationsRule(hensel(birth.set, survive.set), lettered, states, hex)))
 
     if lettered then return Ok(Isotropic(hensel(birth.set, survive.set)))
 
@@ -291,10 +334,12 @@ private wolfram(s: *Scanner) -> Result[Rule, Diagnostic]
 
     Ok(Wolfram(u8(n)))
 
-// One half of a rule as read: the arrangements it names, and whether any count carried letters.
+// One half of a rule as read: the arrangements it names, whether any count carried letters, and where
+// its first count above 6 is, which a hexagonal rule refuses.
 private struct Half
     set: u64
     lettered: bool
+    over_six: Option[usize]
 
 // The `/` and the letter that open a rule's second half.
 private expect_half(s: *Scanner, letter: u8) -> Result[unit, Diagnostic]
@@ -310,7 +355,7 @@ private expect_half(s: *Scanner, letter: u8) -> Result[unit, Diagnostic]
 // One half of a rule: a run of distinct neighbour counts, each with the letters that narrow it.
 private read_half(s: *Scanner) -> Result[Half, Diagnostic]
     var seen: u16 = 0
-    var half = Half(0, false)
+    var half = Half(0, false, None)
 
     loop
         s.peek() match
@@ -325,13 +370,22 @@ private read_half(s: *Scanner) -> Result[Half, Diagnostic]
                     if (seen >> n) & 1 == 1 then return Err(error(at, s"the count ${n} appears twice"))
 
                     seen |= u16(1) << n
+
+                    val over_six = if n > 6 && half.over_six.is_none() then Some(s.offset) else half.over_six
+
                     s.bump()
 
                     val (set, lettered) = read_letters(s, int(n))?
 
-                    half = Half(half.set | set, half.lettered || lettered)
+                    half = Half(half.set | set, half.lettered || lettered, over_six)
                 elif c == u8('-') || letter_index(lower(c)) >= 0
                     return Err(error(at, "a letter or `-` must follow the count whose arrangements it names"))
+                elif lower(c) == u8('o') || lower(c) == u8('m') || lower(c) == u8('p')
+                    return Err(error(at, s"`${char(c)}` is one of Golly's hexagonal letters, o, m and p, which this reader does not take; a hexagonal rule is given by its counts alone"))
+                elif lower(c) == u8('h') && !s.peek_at(1).map(d -> d != u8(' ') && d != u8('\t')).unwrap_or(false)
+                    break
+                elif lower(c) == u8('h')
+                    return Err(error(at, "the `H` that makes a rule hexagonal goes at the end of the rule"))
                 else
                     break
             None -> break

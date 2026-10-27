@@ -29,7 +29,8 @@ any width works, not only multiples of 64: the bits past the width are kept at z
 
 ## The unbounded plane
 
-B/S and isotropic (Hensel) rules run on an **unbounded plane** by default. It holds the cells in
+B/S rules, hexagonal ones among them, and isotropic (Hensel) rules run on an **unbounded plane** by
+default. It holds the cells in
 64×64 tiles of 64 words, the grid's packing, all in one buffer with a free list of slots and a map
 from a tile's coordinates (64-bit, so a glider can travel for as long as you care to watch) to its
 slot. A step runs every live tile, and a neighbour only where the border they share has live cells;
@@ -95,6 +96,35 @@ colour towards the board's. The tests run Brian's Brain, Star Wars, a lettered r
 rule, one with `B0` and one of 256 states against a cell-by-cell oracle on six widths and both edges;
 `23/34/8` against `rules/Swirl.rule`'s tree bit for bit; and `B2-a/S12/C5` against the same rule
 written out by hand as a `rotate4reflect` table.
+
+## Hexagonal rules
+
+```
+sysl run . -- --pattern patterns/hex-glider.rle
+sysl run . -- --rule B2/S34/C3H
+```
+
+Under the second, `r` gives a random fill.
+
+A final **`H`** makes a B/S or Generations rule hexagonal, as in Golly: `B2/S34H`, `S34/B2H`, `34/2H`,
+`B2/S34/C3H`, `34/2/3H`. The counts are of six neighbours, so none is above 6. As in Golly, the grid
+stays square and a cell's six neighbours are its Moore neighbours **without the north-east and
+south-west corners** (NW, N, W, E, S, SE), so RLE from Golly's hexagonal collections loads unchanged.
+The step is the B/S word step counting six of the nine neighbourhood words instead of eight. A
+hexagonal B/S rule runs on the plane, unless it has B0; a hexagonal Generations rule runs on the
+torus. Golly's hexagonal letters (`B2o/S2m34H`) are refused with a diagnostic, and so are Hensel
+letters on a hexagonal rule: Hensel's table is built from eight neighbours.
+
+The board draws hexagonal rules in **square cells**, as Golly does by default. A sheared lattice
+would have to be built into the plane's drawing, the torus's, panning, the tap that toggles a cell,
+and fitting the view, so it is not done.
+
+The tests check which six of the eight cells count, on the grid and on the plane; step hexagonal
+B/S and Generations rules against a cell-by-cell count of the six on five widths and both edges; run
+two gliders from the [HROT glider database](https://github.com/jedlimlx/HROT-Glider-DB) (Peter
+Naszvadi's B2/S34H glider, `patterns/hex-glider.rle`, and muzikbike's B245/S3H one) to the period and
+displacement it lists; run the plane beside the torus; and run B2/S34H as a hexagonal rule table
+beside the `H` rule.
 
 ## Wolfram's elementary rules
 
@@ -239,9 +269,11 @@ sysl run . -- --rule-file rules/Life.rule --pattern 4
 Of its sections, four are read:
 
 - **`@RULE`** names the rule, and the status line shows the name.
-- **`@TABLE`**: `n_states` (2 to 256), `neighborhood` (`Moore` or `vonNeumann`; `hexagonal` and
-  `oneDimensional` are refused by name), `symmetries` (`none`, `rotate4`, `rotate8`,
-  `reflect_horizontal`, `rotate4reflect`, `rotate8reflect`, `permute`), `var` declarations (a set may
+- **`@TABLE`**: `n_states` (2 to 256), `neighborhood` (`Moore`, `vonNeumann` or `hexagonal`, whose
+  transitions list C,N,E,SE,S,W,NW,C' on the six cells the `H` of a B/S rule counts; `oneDimensional`
+  is refused by name), `symmetries` (`none`, `rotate4`, `rotate8`, `reflect_horizontal`,
+  `rotate4reflect`, `rotate8reflect`, `permute`; for `hexagonal`, `none`, `rotate2`, `rotate3`,
+  `rotate6`, `rotate6reflect` and `permute`, as Golly allows), `var` declarations (a set may
   name earlier variables, and a variable written twice in one transition is the same state both
   times), and transitions with commas or as bare digits. The first matching transition wins; a cell
   none matches keeps its state.
@@ -256,8 +288,8 @@ Of its sections, four are read:
 Every other section — `@ICONS`, `@NAMES` — is skipped, as Golly skips one it does not know. A
 malformed file is refused with a diagnostic at its line and column. A table is expanded once, when
 the file is read, into an array indexed by a cell's state and its neighbours', so a step is one
-lookup per cell; that limits a table to 2²⁴ entries, which is up to 6 states for Moore and 27 for
-von Neumann. A tree has no such limit: one that fits is expanded into the same array, and a larger
+lookup per cell; that limits a table to 2²⁴ entries, which is up to 6 states for Moore, 10 for
+hexagonal and 27 for von Neumann. A tree has no such limit: one that fits is expanded into the same array, and a larger
 one is walked for every cell, a step per neighbour.
 
 `rules/` holds `Life.rule` (Life as a `permute` table, which the tests run against B3/S23 bit for
@@ -313,3 +345,4 @@ sysl test .
 
 ISC — see `LICENSE`. `patterns/bosco.rle`, `patterns/majority.rle` and `patterns/gnarl.rle` are from
 [Golly](https://golly.sourceforge.io)'s pattern collection, by the authors their `#O` lines name.
+`patterns/hex-glider.rle` is Peter Naszvadi's, from the HROT glider database.

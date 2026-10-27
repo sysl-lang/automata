@@ -486,7 +486,7 @@ private colour_of(rule: Rule, state: u8) -> u32 =
         BinaryLine(b) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, b.states() - 1)
         TotalisticLine(t) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, t.states() - 1)
         Cyclic(c) -> wheel(int(state), c.states)
-        LifeLike(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> LIVE
+        LifeLike(_, _) | Hex(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> LIVE
 
 // Colour `k` of `n` round a wheel of five hues that starts and ends at the live colour. State 0 is not
 // drawn, and shows the board.

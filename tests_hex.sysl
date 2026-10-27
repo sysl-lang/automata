@@ -1,0 +1,474 @@
+@tests
+
+// Hexagonal rules, Golly's `H`, checked against what they did not compute themselves: the six cells
+// Golly's QuickLife help names as a hexagonal cell's neighbours, a cell-by-cell step that counts those
+// six directly, gliders found by other people's searches, and the same rule written as a hexagonal
+// rule table.
+
+import sysl.buf.{Buf, buf}
+import sysl.rand.{Rng, rng}
+import sysl.text.from_utf8
+
+private val HEX_GLIDER_FILE = from_utf8(embed("patterns/hex-glider.rle")).unwrap()
+
+// Golly's QuickLife help: "QuickLife can emulate a hexagonal neighborhood on a square grid by ignoring
+// the NE and SW corners of the Moore neighborhood", leaving NW, N, W, E, S and SE.
+private val SIX: [](int, int) = [(-1, -1), (0, -1), (-1, 0), (1, 0), (0, 1), (1, 1)]
+
+private val WIDTHS = [5, 63, 64, 65, 130]
+
+private rule(text: string) -> Rule = parse_rule(text).unwrap()
+
+// -- the oracles -------------------------------------------------------------------------------------
+
+// The number of `g`'s six hexagonal neighbours of `x`, `y` in state 1.
+private hex_count(g: Grid, x: int, y: int) -> int
+    var n = 0
+
+    for (dx, dy) in SIX
+        if g.state(x + dx, y + dy) == 1 then n += 1
+
+    n
+
+// One step of a hexagonal B/S rule, or a hexagonal Generations rule of `states` states, a cell at a
+// time: count the six, ask the rule's bits, and age every dying cell.
+private naive(g: Grid, birth: u16, survive: u16, states: int) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            val n = hex_count(g, x, y)
+            val s = int(g.state(x, y))
+            var next = 0
+
+            if s == 0
+                next = int((birth >> n) & 1)
+            elif s == 1
+                next = if (survive >> n) & 1 == 1 then 1 elif states > 2 then 2 else 0
+            else
+                next = if s + 1 == states then 0 else s + 1
+
+            out.set_state(x, y, u8(next))
+
+    out
+
+// A grid of `width` × 40 with a random fill of states below `states`.
+private soup(width: int, edges: Edges, states: int, seed: u64) -> Grid
+    var g = grid(width, 40, edges)
+    var r = rng(seed, 1)
+
+    if states == 2 then g.randomize(&r, 35) else g.randomize_states(&r, states)
+
+    g
+
+// A grid of its own holding `g`'s cells, since a grid's buffers are shared by every copy of the struct.
+private copy_of(g: Grid) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            out.set_state(x, y, g.state(x, y))
+
+    out
+
+// Run `rule` on `g` `n` generations and the oracle beside it, comparing every cell every generation.
+private matches_naive(g: Grid, rule: Rule, birth: u16, survive: u16, states: int, n: int)
+    var fast = copy_of(g)
+    var slow = copy_of(g)
+
+    for i in 1..n
+        fast.step(rule)
+        slow = naive(slow, birth, survive, states)
+
+        for y in 0..<g.height
+            for x in 0..<g.width
+                assert_eq(fast.state(x, y), slow.state(x, y), s"${rule.notation()} width ${g.width}, generation ${i}, cell ${x}, ${y}")
+
+// The live cells of `g` as a picture of their bounding box, `o` live and `.` not, each row ended by
+// `/`, with the box's top-left corner.
+private shape(g: Grid) -> (int, int, string)
+    var x0 = g.width
+    var y0 = g.height
+    var x1 = -1
+    var y1 = -1
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if g.get(x, y)
+                x0 = if x < x0 then x else x0
+                y0 = if y < y0 then y else y0
+                x1 = if x > x1 then x else x1
+                y1 = if y > y1 then y else y1
+
+    var out = ""
+
+    for y in y0..y1
+        for x in x0..x1
+            out = s"${out}${if g.get(x, y) then "o" else "."}"
+
+        out = s"${out}/"
+
+    (x0, y0, out)
+
+// `rle` stamped at the centre of a 64 × 64 torus.
+private torus_with(rle: string) -> Grid
+    var g = grid(64, 64, Torus)
+
+    parse_rle(rle).unwrap().stamp_centred(&g)
+    g
+
+// Under `rule`, the pattern comes back to its own shape after `period` generations, moved by `dx`,
+// `dy`, and not at any generation before.
+private glides(rle: string, rule: Rule, period: int, dx: int, dy: int)
+    var g = torus_with(rle)
+    val (x, y, start) = shape(g)
+
+    for i in 1..period
+        g.step(rule)
+
+        val (nx, ny, now) = shape(g)
+
+        if i < period
+            assert(now != start, s"${rule.notation()}: the shape came back at generation ${i}")
+        else
+            assert_eq(now, start, s"${rule.notation()}: the shape after ${period} generations")
+            assert_eq(nx - x, dx, s"${rule.notation()}: the displacement across")
+            assert_eq(ny - y, dy, s"${rule.notation()}: the displacement down")
+
+// -- notation ----------------------------------------------------------------------------------------
+
+@test("a final H makes a B/S rule hexagonal, in every spelling Golly reads, and notation gives it back")
+hex_notation()
+    val cases = [
+        ("B2/S34H", "B2/S34H"), ("b2/s34h", "B2/S34H"), ("S34/B2H", "B2/S34H"), ("34/2H", "B2/S34H"),
+        ("B245/S3H", "B245/S3H"), ("B/SH", "B/SH"), ("B0123456/S0123456H", "B0123456/S0123456H"),
+        ("  B2/S34H  ", "B2/S34H"), ("B43/S2H", "B34/S2H"),
+    ]
+
+    for (text, written) in cases
+        val r = rule(text)
+
+        assert(r is Hex(_, _), text)
+        assert(r.hexagonal(), text)
+        assert_eq(r.notation(), written, text)
+        assert(rule(r.notation()).same(r), text)
+        assert_eq(r.states(), 2)
+
+@test("a final H makes a Generations rule hexagonal, Golly's /…/…H and B…/S…/C…H alike")
+hex_generations_notation()
+    val cases = [
+        ("34/2/3H", "34/2/3H"), ("B2/S34/C3H", "34/2/3H"), ("S34/B2/C3h", "34/2/3H"),
+        ("/2/5H", "/2/5H"), ("B2/S/C256H", "/2/256H"),
+    ]
+
+    for (text, written) in cases
+        val r = rule(text)
+
+        r match
+            Generations(g) -> assert(g.hex, text)
+            _ -> panic(s"${text} did not read as a Generations rule")
+
+        assert(r.hexagonal(), text)
+        assert_eq(r.notation(), written, text)
+        assert(rule(r.notation()).same(r), text)
+
+@test("a hexagonal rule is never the Moore rule of the same counts, and is its own two-state Generations")
+hex_same()
+    assert(!rule("B2/S34H").same(rule("B2/S34")))
+    assert(!rule("B2/S34").same(rule("B2/S34H")))
+    assert(!rule("34/2/3H").same(rule("34/2/3")))
+    assert(rule("B2/S34H").same(rule("B2/S34/C2H")))
+    assert(!rule("B2/S34H").same(rule("B2/S34/C2")))
+    assert(!rule("B2/S34H").same(rule("B2/S35H")))
+    assert(!rule("B2/S34").hexagonal())
+    assert(!rule("34/2/3").hexagonal())
+
+@test("a malformed hexagonal rule is refused with a diagnostic at the byte that broke it")
+hex_errors()
+    val cases = [
+        ("B2o/S2m34H", "`o` is one of Golly's hexagonal letters", 2),
+        ("B2/S2m34H", "`m` is one of Golly's hexagonal letters", 5),
+        ("B2/S2p34H", "`p` is one of Golly's hexagonal letters", 5),
+        ("B2a/S34H", "take no letters", 7),
+        ("B2/S3-a4H", "take no letters", 8),
+        ("B27/S34H", "a hexagonal cell has 6 neighbours, so 7 cannot be a count", 2),
+        ("B2/S348H", "so 8 cannot be a count", 6),
+        ("S37/B8H", "so 7 cannot be a count", 2),
+        ("B8/S7H", "so 8 cannot be a count", 1),
+        ("37/2/3H", "so 7 cannot be a count", 1),
+        ("B2H/S34", "goes at the end", 2),
+        ("34H/2", "goes at the end", 2),
+        ("B2/S34H/C3", "goes at the end", 6),
+        ("B2/S34HH", "goes at the end", 6),
+        ("B2/S34 H", "unexpected text", 7),
+        ("B2/S34/C3HX", "unexpected text", 10),
+        ("B2/S34/CH", "expected the number of states", 8),
+        ("W110H", "unexpected text", 4),
+    ]
+
+    for (text, says, at) in cases
+        val d = parse_rule(text).unwrap_err()
+
+        assert(d.message.contains(says), s"${text}: ${d.message}")
+        assert_eq(d.span.start, usize(at), s"${text}: ${d.message}")
+
+@test("the counts a Moore rule takes, 7 and 8 and the Hensel letters, still read without the H")
+hex_moore_unchanged()
+    assert(rule("B3/S238") is LifeLike(_, _))
+    assert(rule("B2a/S34") is Isotropic(_))
+    assert_eq(rule("B37/S23").notation(), "B37/S23")
+
+// -- the neighbourhood -------------------------------------------------------------------------------
+
+@test("a hexagonal cell's neighbours are its Moore neighbours but NE and SW, on the grid and on the plane")
+hex_mask()
+    // Under B1/S a dead cell with exactly one live neighbour is born: one live cell beside the
+    // centre says whether that cell counts.
+    val b1 = rule("B1/SH")
+    val moore = rule("B1/S")
+
+    for dy in -1..1
+        for dx in -1..1
+            if dx == 0 && dy == 0 then continue
+
+            val counted = !(dx == 1 && dy == -1) && !(dx == -1 && dy == 1)
+
+            for edges in [Torus, Bounded]
+                var g = grid(9, 9, edges)
+
+                g.set(4 + dx, 4 + dy, true)
+
+                var m = grid(9, 9, edges)
+
+                m.set(4 + dx, 4 + dy, true)
+                g.step(b1)
+                m.step(moore)
+                assert_eq(g.get(4, 4), counted, s"neighbour ${dx}, ${dy}")
+                assert(m.get(4, 4), s"Moore neighbour ${dx}, ${dy}")
+
+            var p = plane()
+
+            p.set(i64(dx), i64(dy), true)
+            p.step(b1)
+            assert_eq(p.get(0, 0), counted, s"plane neighbour ${dx}, ${dy}")
+
+    // Exactly six, so a cell with all eight Moore neighbours alive counts six of them under H.
+    var full = grid(9, 9, Torus)
+
+    for dy in -1..1
+        for dx in -1..1
+            if dx != 0 || dy != 0 then full.set(4 + dx, 4 + dy, true)
+
+    full.step(rule("B6/SH"))
+    assert(full.get(4, 4))
+
+// -- steps against the oracle ------------------------------------------------------------------------
+
+@test("hexagonal B/S rules step random grids as counting the six directly does, every width, both edges")
+hex_steps()
+    for text in ["B2/S34H", "B245/S3H", "B13/S012H", "B0/S2H", "B3456/S0H"]
+        val r = rule(text)
+        val (birth, survive) = r match
+            Hex(b, s) -> (b, s)
+            _ -> panic(text)
+
+        for width in WIDTHS
+            for edges in [Torus, Bounded]
+                matches_naive(soup(width, edges, 2, u64(width)), r, birth, survive, 2, 12)
+
+@test("hexagonal Generations rules step random grids as counting the six directly does")
+hex_generations_steps()
+    for text in ["34/2/3H", "B2/S/C5H", "B24/S35/C8H", "/2/2H"]
+        val r = rule(text)
+        val (birth, survive, states) = r match
+            Generations(g) -> (counts_of(g.life.birth), counts_of(g.life.survive), g.states)
+            _ -> panic(text)
+
+        for width in WIDTHS
+            for edges in [Torus, Bounded]
+                matches_naive(soup(width, edges, states, u64(width) + 7), r, birth, survive, states, 12)
+
+// -- known results -----------------------------------------------------------------------------------
+
+// Two gliders from the HROT glider database (https://github.com/jedlimlx/HROT-Glider-DB, file
+// R1-C2-NH-gliders.db.txt), found by searches that are not this program, each listed with its rule
+// range, period and displacement. **The database's y runs up**, as its entry for Life's glider shows:
+// `bo$o$3o`, which travels west and down a screen whose rows run down, is listed as moving -1, -1.
+// So a listed displacement `dx`, `dy` is `dx`, `-dy` here.
+
+// muzikbike, 2019: B245/S3H to B245/S36H, period 10, listed as moving 0, 2.
+private const MUZIKBIKE: string = "x = 5, y = 6, rule = B245/S3H\nobo$3o$ob3o$4bo$bo2bo$3bo!"
+
+@test("the hexagonal gliders of the HROT database move as it lists them, at the period it gives")
+hex_gliders()
+    val naszvadi = parse_rle(HEX_GLIDER_FILE).unwrap()
+
+    assert(naszvadi.rule.unwrap().same(rule("B2/S34H")))
+
+    // Peter Naszvadi, 2020: B2/S34H to B2/S3456H, period 5, listed as moving -1, 1.
+    for text in ["B2/S34H", "B2/S345H", "B2/S346H", "B2/S3456H"]
+        glides(HEX_GLIDER_FILE, rule(text), 5, -1, -1)
+
+    for text in ["B245/S3H", "B245/S36H"]
+        glides(MUZIKBIKE, rule(text), 10, 0, -2)
+
+@test("a hexagonal glider does not glide under the Moore rule of the same counts")
+hex_glider_needs_hex()
+    var g = torus_with(HEX_GLIDER_FILE)
+    val (_, _, start) = shape(g)
+
+    for _ in 0..<5
+        g.step(rule("B2/S34"))
+
+    val (_, _, now) = shape(g)
+
+    assert(now != start)
+
+// -- the plane ---------------------------------------------------------------------------------------
+
+// Grid cell `x`, `y` is plane cell `x - size / 2`, `y - size / 2`; both are run `n` generations and
+// compared cell by cell, and by population, which also counts any plane cell outside the grid.
+private plane_agrees(g: Grid, r: Rule, n: int)
+    var t = grid(g.width, g.height, g.edges)
+    var p = plane()
+    val half = g.width / 2
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if g.get(x, y)
+                t.set(x, y, true)
+                p.set(i64(x - half), i64(y - half), true)
+
+    for i in 1..n
+        t.step(r)
+        p.step(r)
+        assert_eq(p.population(), t.population(), s"generation ${i}")
+
+        for y in 0..<t.height
+            for x in 0..<t.width
+                assert(p.get(i64(x - half), i64(y - half)) == t.get(x, y), s"generation ${i}, cell ${x}, ${y}")
+
+@test("the plane runs hexagonal rules as a torus too big to wrap does, the glider across tile seams")
+hex_plane()
+    assert(plane_runs(rule("B2/S34H")))
+    assert(!plane_runs(rule("B0/S2H")))
+    assert(!plane_runs(rule("34/2/3H")))
+
+    var g = grid(200, 200, Torus)
+
+    parse_rle(HEX_GLIDER_FILE).unwrap().stamp(&g, 120, 60)
+    plane_agrees(g, rule("B2/S34H"), 150)
+
+    var s = grid(160, 160, Torus)
+    var r = rng(3, 1)
+
+    for y in 60..<100
+        for x in 60..<100
+            if r.below(100) < 35 then s.set(x, y, true)
+
+    plane_agrees(s, rule("B2/S34H"), 60)
+    plane_agrees(s, rule("B245/S3H"), 60)
+
+@test("a hexagonal B/S rule starts on the plane, a hexagonal Generations rule on the torus")
+hex_starts()
+    val p = parse_rle(HEX_GLIDER_FILE).unwrap()
+    val plain = options(["automata"]).unwrap()
+
+    assert(starts_on_plane(plain, p, p.rule.unwrap()))
+    assert(!starts_on_plane(plain, p, rule("34/2/3H")))
+    assert(!starts_on_plane(options(["automata", "--torus"]).unwrap(), p, p.rule.unwrap()))
+
+// -- rule tables -------------------------------------------------------------------------------------
+
+// B2/S34H as a hexagonal rule table: under `permute` a transition stands for every ordering of its
+// neighbours, so one line per count does.
+private const HEX_TABLE: string = "@RULE HexLife\n@TABLE\nn_states:2\nneighborhood:hexagonal\nsymmetries:permute\n0,1,1,0,0,0,0,1\n1,0,0,0,0,0,0,0\n1,1,0,0,0,0,0,0\n1,1,1,0,0,0,0,0\n1,1,1,1,1,1,0,0\n1,1,1,1,1,1,1,0\n"
+
+// The same rule spelled out under rotate6reflect, one line for each arrangement that the hexagon's
+// turns and mirrors tell apart: two live neighbours beside each other, one apart and opposite.
+private const HEX_TABLE_TURNED: string = "@RULE HexLife\n@TABLE\nn_states:2\nneighborhood:hexagonal\nsymmetries:rotate6reflect\n0,1,1,0,0,0,0,1\n0,1,0,1,0,0,0,1\n0,1,0,0,1,0,0,1\n1,0,0,0,0,0,0,0\n1,1,0,0,0,0,0,0\n1,1,1,0,0,0,0,0\n1,1,0,1,0,0,0,0\n1,1,0,0,1,0,0,0\n1,1,1,1,1,1,0,0\n1,1,1,1,1,1,1,0\n"
+
+@test("a hexagonal rule table steps random grids exactly as the B/S rule it spells out does")
+hex_table_steps()
+    for text in [HEX_TABLE, HEX_TABLE_TURNED]
+        val t = parse_rule_file(text).unwrap()
+
+        assert(t.neighbourhood == Hexagonal)
+        assert(Table(t).hexagonal())
+
+        for width in WIDTHS
+            for edges in [Torus, Bounded]
+                var a = soup(width, edges, 2, u64(width) + 3)
+                var b = soup(width, edges, 2, u64(width) + 3)
+
+                for i in 1..15
+                    a.step(Table(t))
+                    b.step(rule("B2/S34H"))
+                    assert(a.same_cells(b), s"width ${width}, generation ${i}")
+
+// The six round the hexagon, clockwise from north, in Golly's order for a hexagonal transition,
+// C,N,E,SE,S,W,NW,C': neighbours next to each other here are next to each other on the lattice.
+private val AROUND: [](int, int) = [(0, -1), (1, 0), (1, 1), (0, 1), (-1, 0), (-1, -1)]
+
+@test("a hexagonal table under rotate6 tells two neighbours side by side from two apart")
+hex_table_geometry()
+    // Birth on exactly two live neighbours that touch; a live cell matches nothing and stays.
+    val t = parse_rule_file("@RULE Touch\n@TABLE\nn_states:2\nneighborhood:hexagonal\nsymmetries:rotate6\n0,1,1,0,0,0,0,1\n").unwrap()
+
+    for width in WIDTHS
+        var g = grid(width, 40, Torus)
+        var r = rng(u64(width), 2)
+
+        // Sparse, so that cells with two live neighbours are common.
+        for y in 0..<g.height
+            for x in 0..<g.width
+                g.set(x, y, r.below(100) < 15)
+
+        val before = copy_of(g)
+
+        g.step(Table(t))
+
+        for y in 0..<g.height
+            for x in 0..<g.width
+                var live = 0
+                var touching = false
+
+                for i in 0..<6
+                    val (dx, dy) = AROUND[i]
+                    val (ex, ey) = AROUND[(i + 1) % 6]
+
+                    if before.get(x + dx, y + dy)
+                        live += 1
+
+                        if before.get(x + ex, y + ey) then touching = true
+
+                val want = before.get(x, y) || (live == 2 && touching)
+
+                assert_eq(g.get(x, y), want, s"width ${width}, cell ${x}, ${y}")
+
+@test("a hexagonal table runs the HROT glider as B2/S34H does")
+hex_table_glider()
+    glides(HEX_GLIDER_FILE, Table(parse_rule_file(HEX_TABLE).unwrap()), 5, -1, -1)
+
+@test("a hexagonal table's settings are refused where Golly refuses them")
+hex_table_errors()
+    val head = "@RULE X\n@TABLE\n"
+    val hex = s"${head}n_states:2\nneighborhood:hexagonal\n"
+    val cases = [
+        (s"${hex}symmetries:rotate4\n0,0,0,0,0,0,0,1\n", "a hexagonal neighbourhood takes the symmetries", 60),
+        (s"${hex}symmetries:rotate8reflect\n0,0,0,0,0,0,0,1\n", "not rotate8reflect", 60),
+        (s"${head}n_states:2\nneighborhood:Moore\nsymmetries:rotate6\n0,0,0,0,0,0,0,0,0,1\n", "rotate6 turns a hexagonal neighbourhood; Moore has 8", 56),
+        (s"${head}n_states:2\nneighborhood:vonNeumann\nsymmetries:rotate3\n0,0,0,0,0,1\n", "vonNeumann has 4", 61),
+        (s"${head}n_states:11\nneighborhood:hexagonal\n0,0,0,0,0,0,0,1\n", "this reader takes up to 10", 24),
+        (s"${hex}0,0,0,0,0,0,0,0,0,1\n", "a hexagonal transition has 8 entries, C,N,E,SE,S,W,NW,C'", 65),
+        (s"${hex}0,0,0,0,0,1\n", "a hexagonal transition has 8 entries", 60),
+    ]
+
+    for (text, says, at) in cases
+        val d = parse_rule_file(text).unwrap_err()
+
+        assert(d.message.contains(says), s"${d.message}")
+        assert_eq(d.span.start, usize(at), s"${d.message}")
+
+    // Ten states are the most a hexagonal table may have: 10^7 entries.
+    assert(parse_rule_file(s"${head}n_states:10\nneighborhood:hexagonal\n0,0,0,0,0,0,0,1\n").is_ok())

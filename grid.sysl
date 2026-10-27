@@ -152,7 +152,10 @@ struct Grid
 
         rule match
             LifeLike(b, s) ->
-                self.step_life_like(b, s)
+                self.step_life_like(MOORE_WORDS, b, s)
+                self.fresh = false
+            Hex(b, s) ->
+                self.step_life_like(HEX_WORDS, b, s)
                 self.fresh = false
             Isotropic(h) ->
                 self.step_isotropic(h)
@@ -166,7 +169,7 @@ struct Grid
             Vote(counts) ->
                 val (b, s) = vote_life(counts)
 
-                self.step_life_like(b, s)
+                self.step_life_like(MOORE_WORDS, b, s)
                 self.fresh = false
             Cyclic(c) ->
                 self.keep_states()
@@ -250,12 +253,13 @@ struct Grid
 
         self.fresh = true
 
-    private step_life_like(*self, birth: u16, survive: u16)
+    // One generation under a B/S rule, counting the neighbours `hood` names.
+    private step_life_like(*self, hood: u16, birth: u16, survive: u16)
         val tail = self.tail_mask()
 
         for y in 0..<self.height
             for k in 0..<self.stride
-                var next = self.life_word(y, k, birth, survive)
+                var next = self.life_word(y, k, hood, birth, survive)
 
                 if k == self.stride - 1 then next &= tail
 
@@ -267,8 +271,8 @@ struct Grid
         self.spare = done
 
     // What word `k` of row `y` becomes under a B/S rule, its tail bits unmasked.
-    private life_word(self, y: int, k: int, birth: u16, survive: u16) -> u64 =
-        life_bits(self.around(y, k), birth, survive)
+    private life_word(self, y: int, k: int, hood: u16, birth: u16, survive: u16) -> u64 =
+        life_bits(self.around(y, k), hood, birth, survive)
 
     // The word's neighbourhood as `life_bits` and `isotropic_bits` take it: for the rows above, at
     // and below, the row's west neighbours, the row itself and its east neighbours.
@@ -332,10 +336,11 @@ struct Grid
         self.spare = occupied
 
         val (birth, survive) = (counts_of(g.life.birth), counts_of(g.life.survive))
+        val hood = if g.hex then HEX_WORDS else MOORE_WORDS
 
         for y in 0..<self.height
             for k in 0..<self.stride
-                val answer = if g.lettered then self.isotropic_word(y, k, g.life) else self.life_word(y, k, birth, survive)
+                val answer = if g.lettered then self.isotropic_word(y, k, g.life) else self.life_word(y, k, hood, birth, survive)
                 var next: u64 = 0
 
                 for b in 0..<min(64, self.width - k * 64)
@@ -512,19 +517,30 @@ grid(width: int, height: int, edges: Edges) -> Grid
 // `x` reduced into `0..<n`, for a negative `x` as well.
 wrap(x: int, n: int) -> int = ((x % n) + n) % n
 
+// Which of a word's nine neighbourhood words, as `life_bits` takes them, are neighbours: bit `i` is
+// `w[i]`. The Moore neighbourhood is every word but the cell's own row, `w[4]`.
+const MOORE_WORDS: u16 = 0b111101111
+
+// Golly's hexagonal neighbourhood, kept on a square grid as Golly keeps it: the Moore neighbourhood
+// without the north-east corner, `w[2]` (the row above, its east neighbours), and the south-west
+// one, `w[6]` (the row below, its west neighbours). A cell's six are then NW, N, W, E, S and SE,
+// which a grid sheared half a cell per row draws as a hexagon.
+const HEX_WORDS: u16 = 0b110101011
+
 // What a word of 64 cells becomes under a B/S rule. `w` is the word's neighbourhood: for the rows
 // above, at and below it, the row's west neighbours (bit `i` is cell `i - 1`), the row, and its east
 // neighbours (bit `i` is cell `i + 1`). A grid and a plane tile each line those nine words up from
-// their own storage; the step is the same.
-life_bits(w: [9]u64, birth: u16, survive: u16) -> u64
-    // Bit-sliced count of the eight neighbours: bit `i` of `c0..c3` is bit 0..3 of cell `i`'s count.
+// their own storage; the step is the same. `hood` says which of the nine words are neighbours,
+// `MOORE_WORDS` or `HEX_WORDS`.
+life_bits(w: [9]u64, hood: u16, birth: u16, survive: u16) -> u64
+    // Bit-sliced count of the neighbours: bit `i` of `c0..c3` is bit 0..3 of cell `i`'s count.
     var c0: u64 = 0
     var c1: u64 = 0
     var c2: u64 = 0
     var c3: u64 = 0
 
     for i in 0..<9
-        if i != 4 then c0, c1, c2, c3 = add(c0, c1, c2, c3, w[usize(i)])
+        if (hood >> i) & 1 == 1 then c0, c1, c2, c3 = add(c0, c1, c2, c3, w[usize(i)])
 
     // Which cells' counts are a birth count, and which a survival count.
     var born: u64 = 0

@@ -20,7 +20,7 @@
 // neighbours is looked up while the file is read and the answer stored in a flat array indexed by
 // the states themselves, so a step costs one load per cell however many transitions the file has.
 // That bounds the table at 2^24 entries — n_states to the power of the neighbourhood's size plus one
-// — which is six states for Moore and twenty-seven for von Neumann.
+// — which is six states for Moore, ten for hexagonal and twenty-seven for von Neumann.
 //
 // A rule may be a @TREE instead (`tree.sysl`), and a file with both is the one that comes first, as
 // Golly reads it. A tree small enough is expanded into the same flat array; a larger one is walked
@@ -46,24 +46,47 @@ enum Neighbourhood
     Moore
     // The four orthogonal cells, clockwise from north: N, E, S, W.
     VonNeumann
+    // Golly's six hexagonal neighbours on its square grid, clockwise from north: N, E, SE, S, W, NW —
+    // the Moore neighbourhood without NE and SW, as a B/S rule's `H` counts them.
+    Hexagonal
 
     // Each neighbour's offset from the cell, in the order a transition lists them.
     ring(self) -> [](int, int)
         self match
             Moore -> [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)]
             VonNeumann -> [(0, -1), (1, 0), (0, 1), (-1, 0)]
+            Hexagonal -> [(0, -1), (1, 0), (1, 1), (0, 1), (-1, 0), (-1, -1)]
 
-    size(self) -> int = if self == Moore then 8 else 4
+    size(self) -> int = int(self.ring().len)
 
     // The neighbours in the order a rule tree looks them up — NW, NE, SW, SE, N, W, E, S, or N, W,
-    // E, S — each as its place in `ring`.
+    // E, S — each as its place in `ring`. A tree is never hexagonal, so that one is the ring's.
     tree_order(self) -> []int
         self match
             Moore -> [7, 1, 5, 3, 0, 6, 2, 4]
             VonNeumann -> [0, 3, 1, 2]
+            Hexagonal -> [0, 1, 2, 3, 4, 5]
 
     // The spelling a transition's entries are listed in, for a diagnostic.
-    order(self) -> string = if self == Moore then "C,N,NE,E,SE,S,SW,W,NW,C'" else "C,N,E,S,W,C'"
+    order(self) -> string
+        self match
+            Moore -> "C,N,NE,E,SE,S,SW,W,NW,C'"
+            VonNeumann -> "C,N,E,S,W,C'"
+            Hexagonal -> "C,N,E,SE,S,W,NW,C'"
+
+    // The neighbourhood's name in a `neighborhood:` line.
+    name(self) -> string
+        self match
+            Moore -> "Moore"
+            VonNeumann -> "vonNeumann"
+            Hexagonal -> "hexagonal"
+
+    // The most states a table on the neighbourhood may have and still expand within MOST_ENTRIES.
+    most_states(self) -> int
+        self match
+            Moore -> 6
+            VonNeumann -> 27
+            Hexagonal -> 10
 
 struct RuleTable
     name: string
@@ -292,8 +315,10 @@ private setting(r: *Reader, s: *Scanner, key: string, key_at: Span) -> Result[un
                 r.hood = Some(Moore)
             elif word == "vonNeumann"
                 r.hood = Some(VonNeumann)
-            elif word == "hexagonal" || word == "oneDimensional"
-                return Err(error(at, s"the ${word} neighbourhood is Golly's, but this reader runs Moore and vonNeumann"))
+            elif word == "hexagonal"
+                r.hood = Some(Hexagonal)
+            elif word == "oneDimensional"
+                return Err(error(at, "the oneDimensional neighbourhood is Golly's, but this reader runs Moore, vonNeumann and hexagonal"))
             else
                 return Err(error(at, s"unknown neighbourhood `${word}`; Golly's are Moore, vonNeumann, hexagonal and oneDimensional"))
         elif key == "symmetries"
@@ -308,8 +333,15 @@ private setting(r: *Reader, s: *Scanner, key: string, key_at: Span) -> Result[un
     end_of_line(s)
 end setting
 
-private val SYMMETRIES = ["none", "rotate4", "rotate8", "reflect_horizontal", "rotate4reflect", "rotate8reflect", "permute"]
-private const SYMMETRY_LIST: string = "none, rotate4, rotate8, reflect_horizontal, rotate4reflect, rotate8reflect and permute"
+private val SYMMETRIES = ["none", "rotate4", "rotate8", "reflect_horizontal", "rotate4reflect", "rotate8reflect", "permute",
+                          "rotate2", "rotate3", "rotate6", "rotate6reflect"]
+private const SYMMETRY_LIST: string =
+    "none, rotate4, rotate8, reflect_horizontal, rotate4reflect, rotate8reflect, permute, and for hexagonal rotate2, rotate3, rotate6 and rotate6reflect"
+
+// The symmetries Golly allows a hexagonal table, and those of them that turn its six neighbours in
+// halves, thirds and sixths, which only a hexagonal table may have.
+private val HEX_SYMMETRIES = ["none", "rotate2", "rotate3", "rotate6", "rotate6reflect", "permute"]
+private val HEX_TURNS = ["rotate2", "rotate3", "rotate6", "rotate6reflect"]
 
 // The settings are complete once the first variable or transition arrives: check that they are
 // there and agree with one another.
@@ -323,6 +355,12 @@ private settle(r: *Reader, at: Span) -> Result[unit, Diagnostic]
     if hood == VonNeumann && r.symmetry.starts_with("rotate8")
         return Err(error(r.symmetry_at, s"${r.symmetry} turns a Moore neighbourhood in eighths; vonNeumann has four neighbours"))
 
+    if hood == Hexagonal && !contains(HEX_SYMMETRIES, r.symmetry)
+        return Err(error(r.symmetry_at, s"a hexagonal neighbourhood takes the symmetries none, rotate2, rotate3, rotate6, rotate6reflect and permute, not ${r.symmetry}"))
+
+    if hood != Hexagonal && contains(HEX_TURNS, r.symmetry)
+        return Err(error(r.symmetry_at, s"${r.symmetry} turns a hexagonal neighbourhood; ${hood.name()} has ${hood.size()} neighbours"))
+
     // The expanded table is n^(size + 1) entries, which must stay within MOST_ENTRIES.
     var entries = 1
 
@@ -331,7 +369,7 @@ private settle(r: *Reader, at: Span) -> Result[unit, Diagnostic]
 
         if entries > MOST_ENTRIES
             return Err(error(r.states_at,
-                s"${r.states} states in a ${if hood == Moore then "Moore" else "vonNeumann"} neighbourhood make a table too large to expand; this reader takes up to ${if hood == Moore then 6 else 27}"))
+                s"${r.states} states in a ${hood.name()} neighbourhood make a table too large to expand; this reader takes up to ${hood.most_states()}"))
 
     r.body = true
     Ok(())
@@ -387,7 +425,7 @@ private transition(r: *Reader, s: *Scanner, line: Span) -> Result[unit, Diagnost
 
     val width = r.width()
     val hood = r.hood.unwrap()
-    val arity = s"a ${if hood == Moore then "Moore" else "vonNeumann"} transition has ${width} entries, ${hood.order()}"
+    val arity = s"a ${hood.name()} transition has ${width} entries, ${hood.order()}"
     val first = r.terms.len()
     val commas = s.rest().contains(",".bytes)
     var count = 0
@@ -681,10 +719,11 @@ end place
 
 // The arrangements a symmetry allows, `m` entries apiece: arrangement `g` reads the transition's
 // neighbour `i` against the cell's neighbour `group[g·m + i]`. A rotation turns the ring; the
-// reflection is left to right, which fixes north and south.
+// reflection reverses the ring, which fixes the first neighbour and the one opposite: north and south
+// in a Moore or von Neumann ring, and, the ring then turned, every other mirror of a hexagon too.
 private arrangements(symmetry: string, m: int) -> Buf[int]
     val group: Buf[int] = buf()
-    val turns = if symmetry.starts_with("rotate8") then 8 elif symmetry.starts_with("rotate4") then 4 else 1
+    val turns = if symmetry.starts_with("rotate") then int(symmetry[6] - u8('0')) else 1
     val reflect = symmetry.ends_with("reflect") || symmetry == "reflect_horizontal"
 
     for t in 0..<turns
