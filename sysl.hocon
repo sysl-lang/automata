@@ -5,7 +5,8 @@
 //     sysl run . -- --shot frame.png
 //
 // The grid is stepped 64 cells per machine word by bit-sliced neighbour counting, under any rule
-// written in B/S notation, on a torus or with dead edges. Golly `.rule` tables (`--rule-file`) run
+// written in B/S notation, on a torus or with dead edges; isotropic non-totalistic rules (Hensel
+// notation, `B2-a/S12`) run through a 512-entry table a cell at a time. Golly `.rule` tables (`--rule-file`) run
 // on a byte per cell. Patterns are read from RLE.
 
 package {

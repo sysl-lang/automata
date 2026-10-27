@@ -1,5 +1,5 @@
-// Cellular automata: a bit-packed grid, any B/S rule, Golly rule tables, RLE patterns, and a syslUI
-// viewer.
+// Cellular automata: a bit-packed grid, any B/S or isotropic non-totalistic rule, Golly rule tables,
+// RLE patterns, and a syslUI viewer.
 //
 //     automata [--rule <B…/S…> | --rule-file <file.rule>] [--pattern <1-5 | file.rle>]
 //              [--size <w>x<h>] [--bounded]

@@ -1,0 +1,371 @@
+@tests
+
+// Isotropic non-totalistic rules, checked against what they did not compute themselves: LifeWiki's
+// drawing of every arrangement, B/S rules spelled out letter by letter, a cell-by-cell step that
+// classifies each neighbourhood afresh, and the same rule written as a Golly rule table.
+
+import sysl.rand.{Rng, rng}
+
+// -- the wiki's drawings -----------------------------------------------------------------------------
+
+// Every arrangement as LifeWiki's table draws it, read off its pictures: the 3×3 block a row at a
+// time, `x` a live neighbour and `o` the cell itself.
+private val DRAWN = [
+    ("0", ".../.o./..."), ("1c", "x../.o./..."), ("1e", ".x./.o./..."),
+    ("2a", "xx./.o./..."), ("2c", "x.x/.o./..."), ("2e", ".x./xo./..."),
+    ("2i", ".x./.o./.x."), ("2k", ".x./.o./..x"), ("2n", "x../.o./..x"),
+    ("3a", "xx./xo./..."), ("3c", "x.x/.o./..x"), ("3e", ".x./xox/..."),
+    ("3i", "x../xo./x.."), ("3j", "..x/.ox/.x."), ("3k", ".x./xo./..x"),
+    ("3n", "x.x/xo./..."), ("3q", "x../xo./..x"), ("3r", ".xx/.o./.x."),
+    ("3y", "x.x/.o./.x."), ("4a", "x../xo./xx."), ("4c", "x.x/.o./x.x"),
+    ("4e", ".x./xox/.x."), ("4i", "x.x/xox/..."), ("4j", "..x/xox/.x."),
+    ("4k", ".xx/xo./..x"), ("4n", "x../xo./x.x"), ("4q", "xx./xo./..x"),
+    ("4r", ".xx/.ox/.x."), ("4t", "xxx/.o./.x."), ("4w", "x../xo./.xx"),
+    ("4y", "x.x/.o./xx."), ("4z", "xx./.o./.xx"), ("5a", "..x/.ox/xxx"),
+    ("5c", ".x./xox/xx."), ("5e", "x.x/.o./xxx"), ("5i", ".xx/.ox/.xx"),
+    ("5j", "xx./xo./x.x"), ("5k", "x.x/.ox/xx."), ("5n", ".x./.ox/xxx"),
+    ("5q", ".xx/.ox/xx."), ("5r", "x../xox/x.x"), ("5y", ".x./xox/x.x"),
+    ("6a", "..x/xox/xxx"), ("6c", ".x./xox/xxx"), ("6e", "x.x/.ox/xxx"),
+    ("6i", "x.x/xox/x.x"), ("6k", "x.x/xox/xx."), ("6n", ".xx/xox/xx."),
+    ("7c", ".xx/xox/xxx"), ("7e", "x.x/xox/xxx"), ("8", "xxx/xox/xxx"),
+]
+
+// A drawing's live neighbours as bits, numbered as `NEIGHBOURS` numbers them.
+private drawn(picture: string) -> int
+    val b = picture.bytes
+    var m = 0
+    var p = 0
+
+    for i in 0..<b.len
+        if b[i] == u8('/') then continue
+
+        if b[i] == u8('x') then m |= 1 << (if p < 4 then p else p - 1)
+
+        p += 1
+
+    m
+
+private count_in(label: string) -> int = int(label.bytes[0] - u8('0'))
+
+// The arrangement a label such as `3j` names: its count's first, then as far along as the letter is
+// in Golly's order.
+private named(label: string) -> int =
+    firsts[count_in(label)] + (if label.len > 1 then letter_index(label.bytes[1]) else 0)
+
+// The eight orientations of a neighbourhood: four turns, then four turns of its mirror image.
+private orientations(m: int) -> [8]int
+    var out = [0; 8]
+    var image = m
+
+    for i in 0..<8
+        out[i] = image
+        image = if i == 3 then reflected(image) else rotated(image)
+
+    out
+
+private bit(a: int) -> u64 = u64(1) << u64(a)
+
+// Every arrangement but `a`.
+private all_but(a: int) -> u64 = ((u64(1) << 51) - 1) ^ bit(a)
+
+private isotropic(text: string) -> Hensel =
+    parse_rule(text).unwrap() match
+        Isotropic(h) -> h
+        _ -> panic(s"${text} did not read as an isotropic rule")
+
+// -- the oracle --------------------------------------------------------------------------------------
+
+// One generation, one cell at a time: gather the eight neighbours into a pattern of bits, find which
+// arrangement they are by turning it until it matches, and look the arrangement up in the rule.
+private naive(g: Grid, h: Hensel) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            var m = 0
+
+            for k in 0..<8
+                val (dx, dy) = NEIGHBOURS[k]
+
+                if g.get(x + dx, y + dy) then m |= 1 << k
+
+            if h.next(g.get(x, y), m) then out.set(x, y, true)
+
+    out
+
+private val WIDTHS = [1, 5, 63, 64, 65, 130]
+
+// A grid of its own holding the same live cells: a `Grid` assigned shares its buffers.
+private copy_of(g: Grid) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if g.get(x, y) then out.set(x, y, true)
+
+    out
+
+// Does `rule` step every random grid as `other` does, generation by generation?
+private agrees(rule: Rule, other: Rule, g: *Rng, generations: int)
+    for w in 0..<WIDTHS.len
+        for e in [Torus, Bounded]
+            var a = grid(WIDTHS[w], 19, e)
+
+            a.randomize(g, 40)
+
+            var b = copy_of(a)
+
+            for gen in 0..<generations
+                a.step(rule)
+                b.step(other)
+                assert(a.same_cells(b))
+
+// Does `h` step every random grid as the oracle says?
+private agrees_with_oracle(h: Hensel, g: *Rng, generations: int)
+    for w in 0..<WIDTHS.len
+        for e in [Torus, Bounded]
+            var fast = grid(WIDTHS[w], 19, e)
+
+            fast.randomize(g, 40)
+
+            for gen in 0..<generations
+                val slow = naive(fast, h)
+
+                fast.step(Isotropic(h))
+                assert(fast.same_cells(slow))
+
+// -- arrangements ------------------------------------------------------------------------------------
+
+@test("the wiki draws 51 arrangements, each is the one its label names in all eight orientations, and they cover all 256 neighbourhoods")
+hen_drawings()
+    assert_eq(DRAWN.len, usize(ARRANGEMENTS))
+
+    var seen = [false; 256]
+
+    for i in 0..<DRAWN.len
+        val (label, picture) = DRAWN[i]
+        val all = orientations(drawn(picture))
+
+        for j in 0..<8
+            assert_eq(arrangement(all[j]), named(label))
+            seen[all[j]] = true
+
+    for m in 0..<256
+        assert(seen[m])
+
+@test("five to seven neighbours are the complements of three to one with the same letter")
+hen_complements()
+    for i in 0..<DRAWN.len
+        val (label, picture) = DRAWN[i]
+        val n = count_in(label)
+
+        if n >= 5 && n <= 7
+            val mirror = s"${8 - n}${char(label.bytes[1])}"
+
+            assert_eq(arrangement(255 ^ drawn(picture)), named(mirror))
+
+@test("a cell amid exactly one arrangement, in any orientation, is born and survives under the rule naming only it, and under no rule leaving it out")
+hen_each_arrangement()
+    for i in 0..<DRAWN.len
+        val (label, picture) = DRAWN[i]
+        val a = named(label)
+        val only = Isotropic(hensel(bit(a), bit(a)))
+        val others = Isotropic(hensel(all_but(a), all_but(a)))
+        val all = orientations(drawn(picture))
+
+        for j in 0..<8
+            for alive in [false, true]
+                for named_only in [true, false]
+                    var g = grid(5, 5, Bounded)
+
+                    for k in 0..<8
+                        val (dx, dy) = NEIGHBOURS[k]
+
+                        if (all[j] >> k) & 1 == 1 then g.set(2 + dx, 2 + dy, true)
+
+                    g.set(2, 2, alive)
+                    g.step(if named_only then only else others)
+                    assert_eq(g.get(2, 2), named_only)
+
+@test("each count and letter in the notation names the arrangement the wiki draws for it, as a birth and as a survival")
+hen_letters()
+    for i in 0..<DRAWN.len
+        val (label, _) = DRAWN[i]
+        val a = named(label)
+
+        assert(parse_rule(s"B${label}/S").unwrap().same(Isotropic(hensel(bit(a), 0))))
+        assert(parse_rule(s"B/S${label}").unwrap().same(Isotropic(hensel(0, bit(a)))))
+
+// -- running them ------------------------------------------------------------------------------------
+
+@test("a B/S rule with every letter of its counts written out reads as that rule and steps as it does, bit for bit, both edges")
+hen_totalistic()
+    val pairs = [
+        ("B3acekijnqry/S2cekain3acekijnqry", "B3/S23"),
+        ("B2aceikn/S", "B2/S"),
+        ("B3aceijknqry6aceikn/S23", "B36/S23"),
+        ("B1ce3aceijknqry5aceijknqry7ce/S1ce3acekijnqry5acekijnqry7ce", "B1357/S1357"),
+        ("B0/S4aceijknqrtwyz8", "B0/S48"),
+    ]
+    var g = rng(11, 5)
+
+    for i in 0..<pairs.len
+        val (lettered, plain) = pairs[i]
+        val h = isotropic(lettered)
+        val bs = parse_rule(plain).unwrap()
+
+        assert(Isotropic(h).same(bs))
+        assert(bs.same(Isotropic(h)))
+        assert_eq(h.notation(), plain)
+        agrees(Isotropic(h), bs, &g, 12)
+
+    // Three takes ten letters: leave out `a` and it is no longer every arrangement of three.
+    val short = isotropic("B3cekijnqry/S2cekain3cekijnqry")
+
+    assert(!Isotropic(short).same(parse_rule("B3/S23").unwrap()))
+    assert_eq(short.notation(), "B3-a/S23-a")
+
+@test("isotropic rules step as the cell-by-cell oracle says on random grids, both edges")
+hen_matches_naive()
+    val rules = ["B2-a/S12", "B3/S2-i34q", "B2ce3aiy4-j/S1e2-kn3q5c8", "B01e/S8", "B2i34q/S0", "B4w5-y6i/S3r7e"]
+    var g = rng(23, 9)
+
+    for r in 0..<rules.len
+        agrees_with_oracle(isotropic(rules[r]), &g, 8)
+
+    // And rules no one would write: any 51 bits each way.
+    for i in 0..<12
+        val h = hensel(g.next_u64() & ((u64(1) << 51) - 1), g.next_u64() & ((u64(1) << 51) - 1))
+
+        agrees_with_oracle(h, &g, 6)
+
+@test("the Life glider flies in tlife, B3/S2-i34q, exactly as in Life — it never meets a 2i or a 4 survival — and the oracle agrees at every step")
+hen_tlife_glider()
+    val tlife = isotropic("B3/S2-i34q")
+    var fast = grid(24, 24, Torus)
+
+    parse_rle("x = 3, y = 3\nbo$2bo$3o!").unwrap().stamp(&fast, 4, 4)
+
+    val start = copy_of(fast)
+    var life = copy_of(fast)
+
+    for gen in 1..96
+        val slow = naive(fast, tlife)
+
+        fast.step(Isotropic(tlife))
+        life.step(parse_rule("B3/S23").unwrap())
+        assert(fast.same_cells(slow))
+        assert(fast.same_cells(life))
+        assert_eq(fast.population(), 5)
+
+    // 96 generations is 24 periods, a cell a period diagonally: once round the torus.
+    for y in 0..<24
+        for x in 0..<24
+            assert_eq(fast.get(x, y), start.get(x, y))
+
+// The rule table Golly would be given for tlife: every arrangement as the wiki draws it, for a dead
+// and a live cell, with the outcome tlife's notation says — births on 3, survivals on 2 but not
+// 2i, on 3, and on 4q — left to `rotate4reflect` to turn into all eight orientations.
+private tlife_table() -> string
+    var out = "@RULE tlife\n@TABLE\nn_states:2\nneighborhood:Moore\nsymmetries:rotate4reflect\n"
+    // Golly's ring, clockwise from north, as neighbour bits.
+    val ring = [1, 2, 4, 7, 6, 5, 3, 0]
+
+    for i in 0..<DRAWN.len
+        val (label, picture) = DRAWN[i]
+        val n = count_in(label)
+        val m = drawn(picture)
+        var states = ""
+
+        for k in 0..<8
+            states = s"${states},${(m >> ring[k]) & 1}"
+
+        val born = n == 3
+        val stays = (n == 2 && label != "2i") || n == 3 || label == "4q"
+
+        out = s"${out}0${states},${if born then 1 else 0}\n1${states},${if stays then 1 else 0}\n"
+
+    out
+
+@test("tlife written as a Golly rule table with rotate4reflect evolves exactly as its Hensel notation does")
+hen_table_agrees()
+    val table = Table(parse_rule_file(tlife_table()).unwrap())
+    var g = rng(31, 4)
+
+    agrees(parse_rule("B3/S2-i34q").unwrap(), table, &g, 10)
+
+// -- notation ----------------------------------------------------------------------------------------
+
+@test("a rule's notation is Golly's canonical spelling: births first, letters alphabetical, whichever of letters or `-` is shorter")
+hen_notation()
+    val cases = [
+        ("B2-a/S12", "B2-a/S12"),
+        ("b3AEIJ/s23-K", "B3aeij/S23-k"),
+        ("S2-i34q/B3", "B3/S2-i34q"),
+        ("B3-ceijknqry/S", "B3a/S"),
+        ("B3acei/S", "B3acei/S"),
+        ("B3aceij/S", "B3aceij/S"),
+        ("B3aceijk/S", "B3-nqry/S"),
+        ("B4-acekij/S", "B4nqrtwyz/S"),
+        ("B4-acekq/S", "B4-acekq/S"),
+        ("B4acekqij/S", "B4aceijkq/S"),
+        ("B4acekqijn/S", "B4-rtwyz/S"),
+        ("B2-aceikn/S1c", "B/S1c"),
+        ("  B2a/S  ", "B2a/S"),
+    ]
+
+    for i in 0..<cases.len
+        val (text, canonical) = cases[i]
+
+        assert_eq(isotropic(text).notation(), canonical)
+
+@test("every rule's notation reads back as the same rule")
+hen_round_trip()
+    var g = rng(41, 2)
+
+    for i in 0..<200
+        val h = hensel(g.next_u64() & ((u64(1) << 51) - 1), g.next_u64() & ((u64(1) << 51) - 1))
+
+        assert(parse_rule(h.notation()).unwrap().same(Isotropic(h)))
+
+@test("malformed Hensel notation is refused, pointing at the culprit")
+hen_errors()
+    val cases = [
+        ("B2t/S12", "`t` is not an arrangement of 2 neighbours, which are c, e, a, i, k, n", 2),
+        ("B2-z/S", "not an arrangement of 2", 3),
+        ("B1a/S", "which are c, e", 2),
+        ("B3aa/S23", "`a` appears twice after 3", 3),
+        ("B3ae-i/S23", "a letter or `-` must follow the count", 4),
+        ("B0c/S23", "takes no letters", 2),
+        ("B3/S8-e", "takes no letters", 6),
+        ("B3-/S23", "a `-` must be followed by the letters", 2),
+        ("Bc3/S23", "a letter or `-` must follow the count", 1),
+        ("B3/S-2", "a letter or `-` must follow the count", 4),
+        ("B3a3e/S", "the count 3 appears twice", 3),
+        ("23k/3-x", "a `-` must be followed by the letters", 5),
+        ("B3x/S23", "expected `/`", 2),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rule(text).unwrap_err()
+
+        assert(d.message.contains(says))
+        assert_eq(d.span.start, usize(at))
+
+@test("a Hensel rule is read from --rule, an RLE header and the viewer's rule field alike")
+hen_everywhere()
+    val just_friends = parse_rule("B2-a/S12").unwrap()
+    val named = parse_rle("x = 1, y = 1, rule = B2-a/S12\no!").unwrap()
+    val plain = parse_rle("x = 1, y = 1\no!").unwrap()
+
+    assert(named.rule.unwrap().same(just_friends))
+    assert(chosen_rule("B2-a/S12", plain).unwrap().same(just_friends))
+    assert(chosen_rule("", named).unwrap().same(just_friends))
+    assert(chosen_rule("B2t/S", plain).unwrap_err().contains("not an arrangement of 2"))
+
+    val m = model(grid(16, 16, Torus), parse_rule("B3/S23").unwrap())
+
+    m.use_rule("s12/b2-A")
+    assert(m.rule.same(just_friends))
+    assert_eq(m.rule_text.read(), "B2-a/S12")

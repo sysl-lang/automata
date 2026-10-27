@@ -122,6 +122,9 @@ struct Grid
             LifeLike(b, s) ->
                 self.step_life_like(b, s)
                 self.fresh = false
+            Isotropic(h) ->
+                self.step_isotropic(h)
+                self.fresh = false
             Table(t) -> self.step_table(t)
 
     // One generation under a rule table: a cell's state and its neighbours' make an index, and the
@@ -221,6 +224,44 @@ struct Grid
         self.cells = self.spare
         self.spare = done
     end step_life_like
+
+    // One generation under an isotropic rule, a cell at a time through the rule's table of answers.
+    // A word's three rows are lined up as `step_life_like` lines them up, and the index holds the
+    // columns west of, at and east of a cell: moving one cell east drops the west column and takes
+    // the next one in from the east words, whose bit `i` is cell `i + 1`.
+    private step_isotropic(*self, h: Hensel)
+        val tail = self.tail_mask()
+
+        for y in 0..<self.height
+            for k in 0..<self.stride
+                val north = self.row_word(y - 1, k)
+                val here = self.row_word(y, k)
+                val south = self.row_word(y + 1, k)
+                var en = self.east(y - 1, k, north)
+                var eh = self.east(y, k, here)
+                var es = self.east(y + 1, k, south)
+                val west = (self.west(y - 1, k, north) & 1) | ((self.west(y, k, here) & 1) << 1) |
+                    ((self.west(y + 1, k, south) & 1) << 2)
+                var index = int(west | ((north & 1) << 3) | ((here & 1) << 4) | ((south & 1) << 5))
+                var next: u64 = 0
+
+                for i in 0..<64
+                    index |= int((en & 1) << 6) | int((eh & 1) << 7) | int((es & 1) << 8)
+                    next |= u64(h.answers[usize(index)]) << u64(i)
+                    index >>= 3
+                    en >>= 1
+                    eh >>= 1
+                    es >>= 1
+
+                if k == self.stride - 1 then next &= tail
+
+                self.spare[self.word_at(k, y)] = next
+
+        val done = self.cells
+
+        self.cells = self.spare
+        self.spare = done
+    end step_isotropic
 
     // Word `k` of row `y`, with the row wrapped on a torus and an empty row beyond a bounded edge.
     private row_word(self, y: int, k: int) -> u64

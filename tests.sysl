@@ -15,7 +15,7 @@ private naive_step(g: Grid, rule: Rule) -> Grid
 
     val (birth, survive) = rule match
         LifeLike(b, s) -> (b, s)
-        Table(_) -> panic("the naive step is B/S rules' oracle")
+        Isotropic(_) | Table(_) -> panic("the naive step is B/S rules' oracle")
 
     for y in 0..<g.height
         for x in 0..<g.width
@@ -82,7 +82,6 @@ rule_errors()
         ("B9/S23", "8 neighbours", 1),
         ("B33/S23", "appears twice", 2),
         ("B3S23", "expected `/`", 2),
-        ("B2a/S12", "isotropic non-totalistic", 2),
         ("X3/S23", "expected a rule", 0),
         ("B3/S23V", "unexpected text", 6),
         ("B3/23", "expected `S`", 3),

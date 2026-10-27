@@ -1,0 +1,225 @@
+// Isotropic non-totalistic rules: B/S notation with each count split by the shape its live
+// neighbours make, as Alan Hensel wrote it down and Golly and LifeWiki read it.
+//
+//     B2-a/S12         births on 2 neighbours unless they are side by side; survivals on 1 or 2
+//     B3/S2-i34q       births on 3; survivals on 2 unless opposite, 3, and 4 in a `q`
+//
+// **There are 51 arrangements.** Two neighbourhoods are one arrangement when a rotation or a
+// reflection of the 3×3 block turns one into the other, and that leaves 1 arrangement of no live
+// neighbours, 2 of one, 6 of two, 10 of three and 13 of four; five to eight neighbours mirror three to
+// none, an arrangement of `n` being the complement of the one of `8 - n` with the same letter. A count
+// followed by letters means only the arrangements they name, a count followed by `-` and letters
+// means all but those, and a bare count means all of them — so plain B/S is the special case where
+// every count is bare.
+//
+// A rule is then two sets of arrangements, a bit apiece in a `u64`: bit `firsts[n] + i` is the
+// arrangement of `n` neighbours whose letter is the `i`th of `ORDER`.
+//
+// **A rule runs as a table of 512 answers**, one for each state of a cell and its eight neighbours,
+// filled once when the rule is read. The bit-packed grid looks each cell's 3×3 block up in it, the
+// block's index slid along a word a column at a time, so a cell costs a handful of shifts and one load
+// whatever the rule says. (Run as a decision diagram over whole words instead — each node one select
+// of 64 cells — a typical rule's 40 to 100 nodes cost more than the lookups do.)
+
+import sysl.buf.{Buf, buf_filled}
+import sysl.math.max
+
+// The neighbours in the order their bits are numbered: north-west, north, north-east, west, east,
+// south-west, south, south-east — reading order around the cell.
+val NEIGHBOURS = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+
+// Hensel's letters, in the order Golly numbers them: a count of `n` takes the first `letters[n]`.
+val ORDER: [13]u8 = "ceaiknjqrytwz"
+
+// The same letters alphabetically, the order a rule's notation writes them in.
+private val ALPHABETICAL: [13]u8 = "aceijknqrtwyz"
+
+// How many letters each count takes; 0 and 8 have one arrangement and take none.
+val letters = [0, 2, 6, 10, 13, 10, 6, 2, 0]
+
+// The bit of each count's first arrangement.
+val firsts = [0, 1, 3, 9, 19, 32, 42, 48, 50]
+
+// How many arrangements there are.
+const ARRANGEMENTS: int = 51
+
+// The arrangements of one to four neighbours in Golly's table, a count's letters in `ORDER`, each a
+// 3×3 block with bit `3·row + column` set for a live cell and bit 4 the cell itself. Count `n` starts
+// at `firsts[n] - 1`.
+private val GOLLY = [1, 2,
+                     5, 10, 3, 40, 33, 68,
+                     69, 42, 11, 7, 98, 13, 14, 70, 41, 97,
+                     325, 170, 15, 45, 99, 71, 106, 102, 43, 101, 105, 78, 108]
+
+// How many live neighbours arrangement `a` has.
+count_of(a: int) -> int
+    for n in 1..8
+        if firsts[n] > a then return n - 1
+
+    8
+
+// The neighbours, as bits, that arrangement `a` is drawn with — one of the up to eight neighbourhoods
+// it stands for.
+shape(a: int) -> int
+    val n = count_of(a)
+
+    if n == 0 then return 0
+
+    if n == 8 then return 255
+
+    if n <= 4
+        val g = GOLLY[a - 1]
+
+        return (g & 0xF) | ((g >> 5) << 4)
+
+    255 ^ shape(firsts[8 - n] + a - firsts[n])
+
+// The arrangement the neighbours `m` make.
+arrangement(m: int) -> int
+    val n = popcount(m)
+    var image = m
+
+    for i in 0..<8
+        for a in firsts[n]..<firsts[n] + max(1, letters[n])
+            if shape(a) == image then return a
+
+        image = if i == 3 then reflected(image) else rotated(image)
+
+    panic(s"the neighbours ${m} are no arrangement")
+
+// The neighbours `m` turned a quarter turn clockwise.
+rotated(m: int) -> int = moved(m, false)
+
+// The neighbours `m` mirrored left to right.
+reflected(m: int) -> int = moved(m, true)
+
+private moved(m: int, mirror: bool) -> int
+    var out = 0
+
+    for k in 0..<8
+        if (m >> k) & 1 == 1
+            val (dx, dy) = NEIGHBOURS[k]
+
+            out |= 1 << (if mirror then bit_at(-dx, dy) else bit_at(-dy, dx))
+
+    out
+
+private bit_at(dx: int, dy: int) -> int
+    for k in 0..<8
+        val (x, y) = NEIGHBOURS[k]
+
+        if x == dx && y == dy then return k
+
+    panic("not a neighbour")
+
+private popcount(m: int) -> int
+    var n = 0
+
+    for k in 0..<8
+        n += (m >> k) & 1
+
+    n
+
+// Every arrangement of each count in `counts`, the B/S rule's set.
+set_of(counts: u16) -> u64
+    var set: u64 = 0
+
+    for n in 0..8
+        if (counts >> n) & 1 == 1 then set |= all_of(n)
+
+    set
+
+// The counts whose every arrangement is in `set`.
+counts_of(set: u64) -> u16
+    var counts: u16 = 0
+
+    for n in 0..8
+        if set & all_of(n) == all_of(n) then counts |= u16(1) << n
+
+    counts
+
+// The bits of all the arrangements of `n` neighbours.
+all_of(n: int) -> u64 = ((u64(1) << u64(max(1, letters[n]))) - 1) << u64(firsts[n])
+
+struct Hensel
+    // Bit `a` of `birth` says a dead cell whose neighbours make arrangement `a` comes alive; bit `a`
+    // of `survive` says a live one stays alive.
+    birth: u64
+    survive: u64
+    // What a cell becomes, 1 or 0, indexed by its 3×3 block a column at a time: bit `3·column + row`,
+    // column 0 the west and row 0 the north, so bit 4 is the cell itself. Column-major because a
+    // step slides the block east by shifting out one column and shifting in the next.
+    answers: Buf[u8]
+
+    // Does a cell that is `alive`, with the neighbours `m`, live in the next generation?
+    next(self, alive: bool, m: int) -> bool
+        val set = if alive then self.survive else self.birth
+
+        (set >> u64(arrangement(m))) & 1 == 1
+
+    // The rule in Golly's canonical spelling: births then survivals, a count whose every arrangement
+    // is in written bare, and otherwise whichever of its letters or `-` and the others is shorter.
+    notation(self) -> string = s"B${half(self.birth)}/S${half(self.survive)}"
+end Hensel
+
+// A rule from its two sets of arrangements, with its table of answers filled in.
+hensel(birth: u64, survive: u64) -> Hensel
+    var answers: Buf[u8] = buf_filled(512, 0)
+
+    for block in 0..<512
+        var m = 0
+
+        for k in 0..<8
+            val (dx, dy) = NEIGHBOURS[k]
+
+            if (block >> (3 * (dx + 1) + dy + 1)) & 1 == 1 then m |= 1 << k
+
+        val set = if (block >> 4) & 1 == 1 then survive else birth
+
+        answers[usize(block)] = u8((set >> u64(arrangement(m))) & 1)
+
+    Hensel(birth, survive, answers)
+
+// One half of a rule's notation.
+private half(set: u64) -> string
+    var out = ""
+
+    for n in 0..8
+        val k = letters[n]
+        val mine = set & all_of(n)
+        val have = popcount64(mine)
+
+        if have == 0 then continue
+
+        out = s"${out}${n}"
+
+        if have == max(1, k) then continue
+
+        // Golly writes the letters a count has while that is at most half of them, and seven of
+        // thirteen as letters too.
+        val listed = have <= k / 2 || (k == 13 && have == 7)
+
+        if !listed then out = s"${out}-"
+
+        for i in 0..<13
+            val pos = letter_index(ALPHABETICAL[i])
+
+            if pos < k && ((mine >> u64(firsts[n] + pos)) & 1 == 1) == listed
+                out = s"${out}${char(ALPHABETICAL[i])}"
+
+    out
+
+// Where a lower-case letter is in `ORDER`, or -1.
+letter_index(c: u8) -> int
+    for i in 0..<13
+        if ORDER[i] == c then return i
+
+    -1
+
+private popcount64(x: u64) -> int
+    var n = 0
+
+    for k in 0..<64
+        n += int((x >> u64(k)) & 1)
+
+    n

@@ -1,7 +1,7 @@
 # automata
 
 Cellular automata in [sysl](https://github.com/sysl-lang/sysl): a bit-packed grid that steps
-64 cells per machine word, any rule written in B/S notation, Golly rule tables, RLE patterns, and a
+64 cells per machine word, any rule written in B/S or Hensel notation, Golly rule tables, RLE patterns, and a
 [syslUI](https://github.com/sysl-lang/syslui) viewer.
 
 ![The Gosper glider gun after 60 generations](shot.png)
@@ -33,7 +33,16 @@ A rule is a value, parsed from B/S notation wherever it comes from: `--rule`, th
 RLE header, or the field under the board. `B3/S23`, `S23/B3` and the older `23/3` all read as Life;
 `B2/S` (Seeds) has an empty half. A rule that does not read is refused with a diagnostic pointing at
 the character that broke it, on stderr from the command line and in the status area in the viewer.
-Isotropic non-totalistic notation (`B2a/S12`) is recognised and refused by name.
+
+**Isotropic non-totalistic rules** are read in Hensel notation, as Golly and LifeWiki write it:
+`B2-a/S12`, `B3/S2-i34q`, `B3aeij/S23-k`. Letters after a count name which of its arrangements it
+means, `-` and letters mean all but those, and a bare count means all of them; letters may be either
+case, and the status line shows the rule in Golly's canonical spelling. The 51 arrangements are
+compiled into a 512-entry table (a cell's state and its eight neighbours), which the step reads once
+per cell, sliding each cell's 3×3 block along the packed words a column at a time. The tests check
+every arrangement against LifeWiki's drawing of it in all eight orientations, B/S rules spelled out
+letter by letter against the B/S engine, random rules against a cell-by-cell oracle, and tlife against
+the same rule written as a Golly `rotate4reflect` table.
 
 ## Rule files
 

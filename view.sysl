@@ -142,7 +142,7 @@ impl View for Board
         // A rule table gives state 0 a colour of its own, which the whole grid is laid in first.
         m.rule match
             Table(t) -> c.fill(Rect(int(left), int(top), int(z * real(g.width)), int(z * real(g.height))), t.colours[0])
-            LifeLike(_, _) -> ()
+            LifeLike(_, _) | Isotropic(_) -> ()
 
         // Only the rows and columns that land inside the board are looked at.
         val y0 = max(0, int(((real(r.y) - top) / z).floor()))
@@ -203,7 +203,7 @@ impl View for Board
 private colour_of(rule: Rule, state: u8) -> u32 =
     rule match
         Table(t) -> t.colours[usize(state)]
-        LifeLike(_, _) -> LIVE
+        LifeLike(_, _) | Isotropic(_) -> LIVE
 
 // What a frame does on its own: run as many generations as the speed owes.
 tick(m: &Model, dt: real)

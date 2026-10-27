@@ -15,20 +15,30 @@ enum Rule
     // bit `n` of `survive` says a live cell with `n` stays alive. Conway's Life is B3/S23: births
     // `{3}`, survivals `{2, 3}`.
     LifeLike(birth: u16, survive: u16)
+    // An isotropic non-totalistic rule: what a cell becomes depends on its own state and on the
+    // arrangement its live neighbours make, up to rotation and reflection.
+    Isotropic(rule: Hensel)
     // A rule table read from a Golly `.rule` file: any number of states up to what its expanded
     // table holds, on a Moore or von Neumann neighbourhood.
     Table(table: RuleTable)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
-    // back to the same rule; or a table's name from its @RULE line.
+    // back to the same rule; Hensel notation in Golly's canonical spelling; or a table's name from
+    // its @RULE line.
     notation(self) -> string
         self match
             LifeLike(b, s) -> s"B${counts(b)}/S${counts(s)}"
+            Isotropic(h) -> h.notation()
             Table(t) -> t.name
 
+    // Whether two rules make every cell the same: a B/S rule and the Hensel rule naming every
+    // arrangement of the same counts are one rule.
     same(self, other: Rule) -> bool
         (self, other) match
             (LifeLike(b1, s1), LifeLike(b2, s2)) -> b1 == b2 && s1 == s2
+            (Isotropic(h1), Isotropic(h2)) -> h1.birth == h2.birth && h1.survive == h2.survive
+            (LifeLike(b, s), Isotropic(h)) -> set_of(b) == h.birth && set_of(s) == h.survive
+            (Isotropic(h), LifeLike(b, s)) -> set_of(b) == h.birth && set_of(s) == h.survive
             (Table(t1), Table(t2)) -> t1.name == t2.name && t1.states == t2.states && t1.next == t2.next
             _ -> false
 end Rule
@@ -42,7 +52,7 @@ private counts(mask: u16) -> string
 
     out
 
-// Read a rule in B/S notation.
+// Read a rule in B/S or Hensel notation.
 //
 // Three spellings are accepted, because all three are in circulation in pattern files:
 //
@@ -50,8 +60,12 @@ private counts(mask: u16) -> string
 //   - `S23/B3`, the same two halves the other way round;
 //   - `23/3`, survivals then births with no letters, the older notation many RLE files still carry.
 //
-// The letters may be either case. Each half is a run of distinct digits from 0 to 8 and may be empty
-// (`B2/S` is Seeds). Anything else is refused with a diagnostic pointing at the byte that broke it.
+// Each half is a run of distinct digits from 0 to 8 and may be empty (`B2/S` is Seeds). **A digit may
+// be followed by Hensel letters** (`B2a`), or by `-` and letters (`B2-a`), naming which arrangements
+// of that many neighbours it means; see `hensel.sysl`. Letters, `B` and `S` may be either case, as
+// Golly reads them. A rule with no letters anywhere is a B/S rule; one with any is isotropic, even
+// when its letters add up to whole counts. Anything else is refused with a diagnostic pointing at the
+// byte that broke it.
 parse_rule(text: string) -> Result[Rule, Diagnostic]
     var s = scanner_of(text)
 
@@ -60,25 +74,25 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
     if s.at_end() then return Err(error(s.here(), "a rule is needed, such as B3/S23"))
 
     val first = s.peek().unwrap()
-    var birth: u16 = 0
-    var survive: u16 = 0
+    var birth = Half(0, false)
+    var survive = Half(0, false)
 
     if first == u8('B') || first == u8('b')
         s.bump()
-        birth = read_counts(&s)?
+        birth = read_half(&s)?
         expect_half(&s, u8('S'))?
-        survive = read_counts(&s)?
+        survive = read_half(&s)?
     elif first == u8('S') || first == u8('s')
         s.bump()
-        survive = read_counts(&s)?
+        survive = read_half(&s)?
         expect_half(&s, u8('B'))?
-        birth = read_counts(&s)?
+        birth = read_half(&s)?
     elif first.is_digit() || first == u8('/')
-        survive = read_counts(&s)?
+        survive = read_half(&s)?
 
         if !s.accept(u8('/')) then return Err(error(s.here(), "expected `/` between the survival and birth counts"))
 
-        birth = read_counts(&s)?
+        birth = read_half(&s)?
     else
         return Err(error(Span(s.offset, s.offset + 1), "expected a rule such as B3/S23"))
 
@@ -87,8 +101,15 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
     if !s.at_end()
         return Err(error(Span(s.offset, text.len), "unexpected text after the rule"))
 
-    Ok(LifeLike(birth, survive))
+    if birth.lettered || survive.lettered then return Ok(Isotropic(hensel(birth.set, survive.set)))
+
+    Ok(LifeLike(counts_of(birth.set), counts_of(survive.set)))
 end parse_rule
+
+// One half of a rule as read: the arrangements it names, and whether any count carried letters.
+private struct Half
+    set: u64
+    lettered: bool
 
 // The `/` and the letter that open a rule's second half.
 private expect_half(s: *Scanner, letter: u8) -> Result[unit, Diagnostic]
@@ -101,35 +122,83 @@ private expect_half(s: *Scanner, letter: u8) -> Result[unit, Diagnostic]
 
     Ok(())
 
-// One half of a rule: a run of distinct neighbour counts.
-//
-// **A Hensel letter straight after a count is refused by name**, because that is what isotropic
-// non-totalistic notation looks like (`B2a/S12`, `B2-a/S12`), and a person who wrote one deserves to
-// hear that the notation is the problem rather than that the letter is.
-private read_counts(s: *Scanner) -> Result[u16, Diagnostic]
-    var mask: u16 = 0
+// One half of a rule: a run of distinct neighbour counts, each with the letters that narrow it.
+private read_half(s: *Scanner) -> Result[Half, Diagnostic]
+    var seen: u16 = 0
+    var half = Half(0, false)
 
     loop
         s.peek() match
             Some(c) ->
+                val at = Span(s.offset, s.offset + 1)
+
                 if c.is_digit()
                     val n = c - u8('0')
-                    val at = Span(s.offset, s.offset + 1)
 
                     if n > 8 then return Err(error(at, s"a cell has 8 neighbours, so ${n} cannot be a count"))
 
-                    if (mask >> n) & 1 == 1 then return Err(error(at, s"the count ${n} appears twice"))
+                    if (seen >> n) & 1 == 1 then return Err(error(at, s"the count ${n} appears twice"))
 
-                    mask |= u16(1) << n
+                    seen |= u16(1) << n
                     s.bump()
-                elif mask != 0 && "cekainyqjrtwz-".contains(str_of(c))
-                    return Err(error(Span(s.offset, s.offset + 1),
-                        "letters after a count are isotropic non-totalistic notation, which this reader does not take"))
+
+                    val (set, lettered) = read_letters(s, int(n))?
+
+                    half = Half(half.set | set, half.lettered || lettered)
+                elif c == u8('-') || letter_index(lower(c)) >= 0
+                    return Err(error(at, "a letter or `-` must follow the count whose arrangements it names"))
                 else
                     break
             None -> break
 
-    Ok(mask)
-end read_counts
+    Ok(half)
+end read_half
+
+// The arrangements of `n` neighbours that the letters after the count name — every one when there
+// are none — and whether there were any.
+private read_letters(s: *Scanner, n: int) -> Result[(u64, bool), Diagnostic]
+    val k = letters[n]
+    val minus = s.offset
+    val negated = s.accept(u8('-'))
+    var named: u64 = 0
+
+    loop
+        val c = lower(s.peek().unwrap_or(0))
+        val i = letter_index(c)
+
+        if i < 0 then break
+
+        val at = Span(s.offset, s.offset + 1)
+
+        if k == 0 then return Err(error(at, s"${n} neighbours have only one arrangement, so ${n} takes no letters"))
+
+        if i >= k then return Err(error(at, s"`${char(c)}` is not an arrangement of ${n} neighbours, which are ${spelled(n)}"))
+
+        if (named >> u64(i)) & 1 == 1 then return Err(error(at, s"`${char(c)}` appears twice after ${n}"))
+
+        named |= u64(1) << u64(i)
+        s.bump()
+
+    if negated && named == 0 then return Err(error(Span(minus, minus + 1), "a `-` must be followed by the letters it takes away"))
+
+    val all = all_of(n)
+
+    if named == 0 then return Ok((all, false))
+
+    val set = named << u64(firsts[n])
+
+    Ok((if negated then all & ~set else set, true))
+end read_letters
+
+// The letters a count takes, for a diagnostic: `c, e, a, i, k, n`.
+private spelled(n: int) -> string
+    var out = ""
+
+    for i in 0..<letters[n]
+        out = if i == 0 then str_of(ORDER[i]) else s"${out}, ${str_of(ORDER[i])}"
+
+    out
+
+private lower(c: u8) -> u8 = if c >= u8('A') && c <= u8('Z') then c + 32 else c
 
 private str_of(c: u8) -> string = s"${char(c)}"
