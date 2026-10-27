@@ -301,6 +301,24 @@ checked against Generations worked out cell by cell).
 sysl run . -- --rule-file rules/Swirl.rule --pattern 4
 ```
 
+### Langton's ant and turmites
+
+Golly runs Langton's ant and turmites as ordinary rule trees, von Neumann, with a state for each
+colour and one for each colour × ant state × direction (an ant on colour `c` in state `s` facing N, E,
+S or W is `colours + 4·(states·c + s) + d`), and so does this. `rules/` holds three of Golly's own
+files: `Langtons-Ant.rule` (10 states), `LangtonsAnt_LLRR.rule` (the four-colour cardioid, 20) and
+`Turmite_180121020081.rule` (a two-state turmite, 18). The tests step each against a turmite stepped
+directly from the action table its name spells, and Langton's ant against the literature: from one
+ant, 12 more black cells and two cells diagonally every 104 steps from step 9977, and not before.
+Golly's larger turmites — the 39- and 203-state ones in its Rules folder — read and run too, walked
+rather than expanded.
+
+```
+sysl run . -- --rule-file rules/Langtons-Ant.rule --pattern patterns/langtons-ant.rle --size 200x200
+sysl run . -- --rule-file rules/LangtonsAnt_LLRR.rule --pattern patterns/langtons-ant-llrr.rle
+sysl run . -- --rule-file rules/Turmite_180121020081.rule --pattern patterns/turmite.rle
+```
+
 ## Patterns
 
 RLE as Golly and LifeWiki write it: `#` lines (`#N` names the pattern), the `x = , y = , rule =`
@@ -346,3 +364,7 @@ sysl test .
 ISC — see `LICENSE`. `patterns/bosco.rle`, `patterns/majority.rle` and `patterns/gnarl.rle` are from
 [Golly](https://golly.sourceforge.io)'s pattern collection, by the authors their `#O` lines name.
 `patterns/hex-glider.rle` is Peter Naszvadi's, from the HROT glider database.
+`rules/Langtons-Ant.rule`, `rules/LangtonsAnt_LLRR.rule` and `rules/Turmite_180121020081.rule` are
+Golly's own files, unchanged but for a description naming their source; Golly is Copyright © 2005–2026
+The Golly Gang and free software under the GNU General Public License, version 2 or later, and these
+three files are distributed under those terms, not ISC.
