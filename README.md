@@ -12,6 +12,7 @@ rule tables, RLE and MCell patterns, and a
 sysl run .
 sysl run . -- --rule B36/S23 --pattern 1
 sysl run . -- --pattern my-pattern.rle --size 400x300 --bounded
+sysl run . -- --pattern 2 --torus
 sysl run . -- --shot shot.png --size 96x72 --generations 60
 ```
 
@@ -25,6 +26,31 @@ rule's birth and survival sets is a few ANDs per count.
 
 Edges are a **torus** (the grid wraps) or **bounded** (dead cells beyond the edge that stay dead), and
 any width works, not only multiples of 64: the bits past the width are kept at zero.
+
+## The unbounded plane
+
+B/S and isotropic (Hensel) rules run on an **unbounded plane** by default. It holds the cells in
+64×64 tiles of 64 words, the grid's packing, all in one buffer with a free list of slots and a map
+from a tile's coordinates (64-bit, so a glider can travel for as long as you care to watch) to its
+slot. A step runs every live tile, and a neighbour only where the border they share has live cells;
+the word step is the grid's, its neighbourhood drawn across the tiles' borders. A tile whose next
+generation is empty is given back, so memory follows the population: a glider runs for ever on at
+most four tiles.
+
+A rule with **B0** cannot run there (every empty cell of an endless plane would be born at once), and
+runs on a torus instead; so does every other kind of rule — Generations, Wolfram, Larger than Life,
+MCell's families and rule tables — which keep the grid. `--torus` or `--bounded` asks for the grid
+under any rule (giving both is refused), and so does an MCell file's `#WRAP`. A pattern is placed
+centred on the origin, which is where the grid's centre is: switching between the plane and the grid
+with `t` keeps the picture where it was, and cells beyond the grid's region are dropped on the way
+in (the viewer says how many). `--size` is the grid's size, and on the plane the size of the region
+the first frame shows.
+
+The tests run the plane beside a torus too big to wrap — Life, HighLife, Seeds, Day & Night and three
+isotropic rules, from soups and from the R-pentomino, acorn and gun, centred on tile seams, at
+negative coordinates and 2⁴⁰ cells out — and check they agree cell for cell; run a glider 10 000
+generations in each of the four directions to exactly where it should be on at most four tiles; and
+check tiles are given back and their slots reused.
 
 The tests hold a naive cell-by-cell step as the oracle, and the fast step must agree with it bit for
 bit on random grids under six rules, six widths (1, 5, 63, 64, 65, 130) and both edge modes.
@@ -249,11 +275,15 @@ acorn, Gosper glider gun and pulsar; two Brian's Brain spaceships head on (`/2/3
 | `n` | one generation |
 | `+` / `-` | faster / slower |
 | `r` / `c` | random fill (every colour under a cyclic rule) / clear |
-| `t` | torus / bounded |
+| `t` | plane → torus → bounded → plane (torus / bounded under a rule the plane cannot run) |
+| `f` | fit the view to the pattern (on the grid, to the whole grid) |
 | `1`–`4` | Life, HighLife, Seeds, Day & Night |
 | `5`–`9` | the first five bundled patterns |
 | `0` | the next of the others: Brian's Brain, Star Wars, Rule 110 |
 | the rule field, then Return or **apply** | run a typed rule |
+
+On the plane the status line gives the population and the box the live cells lie in, as its size and
+its north-west cell.
 
 `--shot <png>` opens no window: it runs the pattern for `--generations` (default 100), lays out and
 rasterizes one frame into a PlutoVG surface, and writes it out.

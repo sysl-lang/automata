@@ -1,0 +1,260 @@
+// An unbounded plane for two-state rules: the cells held in 64×64 tiles, and only the tiles that have
+// live cells in them.
+//
+// **A tile is 64 words, one per row, cell `x` of a row bit `x`** — the grid's packing, so a tile's row
+// steps through the same `life_bits` and `isotropic_bits` a grid's row does, its neighbourhood drawn
+// across the tile's borders from the eight tiles around it. Every tile lives in one buffer, slot `s`
+// at words `64·s ..< 64·s + 64`, and a map from a tile's coordinates finds its slot. A slot given back
+// goes on a free list and is the next one handed out, so memory follows the population, not the area
+// the pattern has wandered over.
+//
+// **A step looks at every live tile and at each neighbour its border reaches.** An empty tile next to
+// a live one can only come alive along the border they share, so a neighbour is brought in only where
+// the shared row, column or corner has live cells; a tile whose next generation is empty is given
+// back.
+//
+// Tile `(tx, ty)` holds the cells `64·tx ..< 64·tx + 64` across and `64·ty ..< 64·ty + 64` down, and
+// `y` grows downward, as it does on the grid.
+
+import sysl.buf.{Buf, buf}
+import sysl.container.{Map, map}
+import sysl.math.{min, max}
+
+struct Plane
+    // Each live tile's slot, by the tile's coordinates.
+    tiles: Map[(i64, i64), int]
+    // Every slot's 64 rows. A slot on the free list holds whatever it last held, and is zeroed when
+    // it is handed out again.
+    cells: Buf[u64]
+    // The other generation, written by `step` and then swapped in.
+    spare: Buf[u64]
+    // Slots given back, handed out again before the buffers grow.
+    free: Buf[int]
+
+    // Is the cell at `x`, `y` alive?
+    get(self, x: i64, y: i64) -> bool
+        val s = self.slot(x >> 6, y >> 6)
+
+        s >= 0 && (self.cells[at(s, int(y & 63))] >> u64(x & 63)) & 1 == 1
+
+    // Set the cell at `x`, `y`, bringing its tile in if it had none and giving the tile back if it is
+    // left empty.
+    set(*self, x: i64, y: i64, alive: bool)
+        val key = (x >> 6, y >> 6)
+        var s = self.slot(x >> 6, y >> 6)
+
+        if s < 0
+            if !alive then return
+
+            s = self.claim(key)
+
+        val i = at(s, int(y & 63))
+        val bit = u64(1) << u64(x & 63)
+
+        self.cells[i] = if alive then self.cells[i] | bit else self.cells[i] & ~bit
+
+        if !alive && self.empty(s) then self.give_back(key, s)
+
+    toggle(*self, x: i64, y: i64) = self.set(x, y, !self.get(x, y))
+
+    // Every cell dead, and every tile given back.
+    clear(*self)
+        self.tiles.clear()
+        self.cells.clear()
+        self.spare.clear()
+        self.free.clear()
+
+    // How many cells are alive.
+    population(self) -> int
+        var n = 0
+
+        for (_, s) in self.tiles
+            for r in 0..<64
+                n += int(self.cells[at(s, r)].count_ones())
+
+        n
+
+    // How many tiles hold live cells.
+    tile_count(self) -> int = int(self.tiles.len())
+
+    // How many slots the buffers have, given back or not: the most tiles the plane has held at once.
+    slot_count(self) -> int = int(self.cells.len() / 64)
+
+    // The slot of tile `tx`, `ty`, or -1 if it has no live cells.
+    slot(self, tx: i64, ty: i64) -> int = self.tiles.get((tx, ty)).unwrap_or(-1)
+
+    // Row `r` of the tile in slot `s`; an absent tile's rows are empty.
+    row(self, s: int, r: int) -> u64 = if s < 0 then 0 else self.cells[at(s, r)]
+
+    // The smallest box holding every live cell, as its west and north cells and its east and south
+    // ones, or nothing on an empty plane.
+    bounds(self) -> Option[(i64, i64, i64, i64)]
+        var found = false
+        var west: i64 = 0
+        var north: i64 = 0
+        var east: i64 = 0
+        var south: i64 = 0
+
+        for ((tx, ty), s) in self.tiles
+            var cols: u64 = 0
+            var first = -1
+            var last = 0
+
+            for r in 0..<64
+                val w = self.cells[at(s, r)]
+
+                if w != 0
+                    cols |= w
+                    last = r
+
+                    if first < 0 then first = r
+
+            if cols != 0
+                val wx = tx * 64 + i64(cols.trailing_zeros())
+                val ex = tx * 64 + 63 - i64(cols.leading_zeros())
+                val ny = ty * 64 + i64(first)
+                val sy = ty * 64 + i64(last)
+
+                if found
+                    west, north, east, south = min(west, wx), min(north, ny), max(east, ex), max(south, sy)
+                else
+                    west, north, east, south = wx, ny, ex, sy
+                    found = true
+
+        if found then Some((west, north, east, south)) else None
+    end bounds
+
+    // Advance one generation under `rule`, which `plane_runs` must accept.
+    step(*self, rule: Rule)
+        var keys: Buf[(i64, i64)] = buf()
+
+        for (key, _) in self.tiles
+            keys.push(key)
+
+        // The neighbours the live tiles' borders reach, brought in empty for the step to write.
+        for i in 0..<keys.len()
+            val (tx, ty) = keys[i]
+            val s = self.slot(tx, ty)
+            val top = self.cells[at(s, 0)]
+            val bottom = self.cells[at(s, 63)]
+            var west: u64 = 0
+            var east: u64 = 0
+
+            for r in 0..<64
+                west |= self.cells[at(s, r)] & 1
+                east |= self.cells[at(s, r)] >> 63
+
+            self.reach(tx, ty - 1, top != 0)
+            self.reach(tx, ty + 1, bottom != 0)
+            self.reach(tx - 1, ty, west != 0)
+            self.reach(tx + 1, ty, east != 0)
+            self.reach(tx - 1, ty - 1, top & 1 != 0)
+            self.reach(tx + 1, ty - 1, top >> 63 != 0)
+            self.reach(tx - 1, ty + 1, bottom & 1 != 0)
+            self.reach(tx + 1, ty + 1, bottom >> 63 != 0)
+
+        for ((tx, ty), s) in self.tiles
+            val around = self.around(tx, ty)
+
+            for r in 0..<64
+                self.spare[at(s, r)] = next_word(rule, self.neighbourhood(around, r))
+
+        val done = self.cells
+
+        self.cells = self.spare
+        self.spare = done
+
+        keys.clear()
+
+        for (key, s) in self.tiles
+            if self.empty(s) then keys.push(key)
+
+        for i in 0..<keys.len()
+            self.give_back(keys[i], self.slot(keys[i].0, keys[i].1))
+    end step
+
+    // Bring tile `tx`, `ty` in, empty, if `live` says a neighbour's border reaches it.
+    private reach(*self, tx: i64, ty: i64, live: bool)
+        if live && self.slot(tx, ty) < 0 then self.claim((tx, ty))
+
+    // The slots of the 3×3 tiles centred on `tx`, `ty`, a row of tiles at a time from the north-west.
+    private around(self, tx: i64, ty: i64) -> [9]int
+        var s: [9]int = [0; 9]
+
+        for dy in -1..1
+            for dx in -1..1
+                s[usize(3 * (dy + 1) + dx + 1)] = self.slot(tx + i64(dx), ty + i64(dy))
+
+        s
+
+    // Row `r` of the middle tile's neighbourhood as `life_bits` takes it, the rows above and below and
+    // the west and east neighbours drawn from the tiles `around` it.
+    private neighbourhood(self, around: [9]int, r: int) -> [9]u64
+        var w: [9]u64 = [0; 9]
+
+        for dy in -1..1
+            val mid = self.band(around, 1, r + dy)
+            val i = usize(3 * (dy + 1))
+
+            w[i] = (mid << 1) | (self.band(around, 0, r + dy) >> 63)
+            w[i + 1] = mid
+            w[i + 2] = (mid >> 1) | (self.band(around, 2, r + dy) << 63)
+
+        w
+
+    // Row `r` of the tile in column `col` of `around`, `r` running from -1, the last row of the tile
+    // above, to 64, the first row of the tile below.
+    private band(self, around: [9]int, col: int, r: int) -> u64
+        if r < 0 then return self.row(around[usize(col)], 63)
+
+        if r > 63 then return self.row(around[usize(6 + col)], 0)
+
+        self.row(around[usize(3 + col)], r)
+
+    // A slot for tile `key`, zeroed: one given back if there is one, else a new one.
+    private claim(*self, key: (i64, i64)) -> int
+        var s = self.slot_count()
+
+        if self.free.pop() is Some(f)
+            s = f
+        else
+            for i in 0..<64
+                self.cells.push(0)
+                self.spare.push(0)
+
+        for r in 0..<64
+            self.cells[at(s, r)] = 0
+
+        self.tiles.put(key, s)
+        s
+
+    private give_back(*self, key: (i64, i64), s: int)
+        self.tiles.remove(key)
+        self.free.push(s)
+
+    private empty(self, s: int) -> bool
+        for r in 0..<64
+            if self.cells[at(s, r)] != 0 then return false
+
+        true
+end Plane
+
+plane() -> Plane = Plane(map(), buf(), buf(), buf())
+
+// Can `rule` run on the plane? A two-state B/S or isotropic rule can, unless an empty neighbourhood
+// gives birth (B0), which would bring every one of the plane's endless empty cells alive at once.
+plane_runs(rule: Rule) -> bool =
+    rule match
+        LifeLike(b, _) -> b & 1 == 0
+        Isotropic(h) -> h.answers[0] == 0
+        _ -> false
+
+// What a row's word becomes under `rule`, from its neighbourhood.
+private next_word(rule: Rule, w: [9]u64) -> u64 =
+    rule match
+        LifeLike(b, s) -> life_bits(w, b, s)
+        Isotropic(h) -> isotropic_bits(w, h)
+        _ -> panic("only a rule plane_runs accepts runs on the plane")
+
+// Where row `r` of slot `s` is in the buffers.
+private at(s: int, r: int) -> usize = usize(s * 64 + r)

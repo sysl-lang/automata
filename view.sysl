@@ -10,8 +10,9 @@ import sh.sysl.ui.{View, Canvas, Size, Rect, Signal, signal, column, row, text, 
                    spacer, NOBODY}
 import sh.sysl.ui_sdl.stop
 import sh.sysl.sdl3.{Event, EventKind, SCANCODE_ESCAPE, SCANCODE_SPACE, SCANCODE_N, SCANCODE_R,
-                     SCANCODE_C, SCANCODE_T, SCANCODE_0, SCANCODE_1, SCANCODE_EQUALS, SCANCODE_MINUS,
+                     SCANCODE_C, SCANCODE_T, SCANCODE_F, SCANCODE_0, SCANCODE_1, SCANCODE_EQUALS, SCANCODE_MINUS,
                      SCANCODE_KP_PLUS, SCANCODE_KP_MINUS, SCANCODE_RETURN, SCANCODE_KP_ENTER}
+import sysl.buf.{Buf, buf}
 import sysl.math.{Float, clamp, max, min}
 import sysl.rand.{Rng, rng}
 
@@ -34,14 +35,24 @@ const RULE_FIELD: int = 1
 // tree is built from is in signals, so writing one rebuilds the status line on the same frame.
 struct Model
     grid: Grid
+    // The unbounded plane, and whether it is what runs. While it is, the grid keeps only its size: the
+    // region the first view shows, and the one the plane is copied into when the view leaves it.
+    plane: Plane
+    on_plane: bool
     rule: Rule
     running: bool
     speed: int
-    // Points per cell, and where cell (0, 0)'s corner is, relative to the board's own corner.
+    // Points per cell, and where cell (0, 0)'s corner is, relative to the board's own corner. On the
+    // plane it is cell (`cx`, `cy`)'s corner instead, and whole cells of the offset are moved into
+    // those, so the offsets stay within a cell however far the view travels.
     zoom: real
     ox: real
     oy: real
+    cx: i64
+    cy: i64
     placed: bool
+    // Whether the next frame fits the view to the pattern.
+    fitting: bool
     // Fractions of a generation owed, carried from frame to frame.
     owed: real
     // Whether a field has the keyboard, so typing a rule does not also drive the shortcuts.
@@ -58,9 +69,15 @@ struct Model
 
     advance(*self, n: int)
         for i in 0..<n
-            self.grid.step(self.rule)
+            if self.on_plane then self.plane.step(self.rule) else self.grid.step(self.rule)
 
         self.generation.set(self.generation.read() + n)
+
+    // Start with `p`: at the plane's origin if `plane`, else centred on the grid.
+    start(*self, p: Pattern, plane: bool)
+        self.on_plane = plane
+
+        if plane then p.stamp_origin(&self.plane) else p.stamp_centred(&self.grid)
 
     // Run `text` as the rule, or say why it cannot be.
     use_rule(*self, text: string)
@@ -69,12 +86,22 @@ struct Model
                 self.rule = r
                 self.rule_text.set(r.notation())
                 self.message.set(s"rule ${r.notation()}")
+                self.leave_plane_for(r)
             Err(d) -> self.message.set(s"${d.message} (column ${d.span.start + 1} of \"${text}\")")
 
     // Replace the board with `p`, centred, under its own rule if it names one.
     load(*self, p: Pattern)
-        self.grid.clear()
-        p.stamp_centred(&self.grid)
+        p.rule match
+            Some(r) -> self.leave_plane_for(r)
+            None -> ()
+
+        if self.on_plane
+            self.plane.clear()
+            p.stamp_origin(&self.plane)
+        else
+            self.grid.clear()
+            p.stamp_centred(&self.grid)
+
         self.generation.set(0)
 
         p.rule match
@@ -84,11 +111,112 @@ struct Model
             None -> ()
 
         self.message.set(if p.name != "" then p.name else "pattern loaded")
+
+    // Every cell dead.
+    clear(*self)
+        if self.on_plane then self.plane.clear() else self.grid.clear()
+
+        self.generation.set(0)
+
+    // A random soup over the grid's region; on the plane, the region centred on the origin.
+    randomize(*self)
+        // A cyclic rule starts from every colour at once, as MCell's cyclic rules want.
+        if self.rule is Cyclic(c) then self.grid.randomize_states(&self.random, c.states) else self.grid.randomize(&self.random, 30)
+
+        if self.on_plane then self.copy_to_plane()
+
+        self.generation.set(0)
+
+    // Flip the cell at `x`, `y` of the view's own coordinates: the grid's, or the plane's.
+    toggle(*self, x: i64, y: i64)
+        if self.on_plane then self.plane.toggle(x, y) else self.grid.toggle(int(x), int(y))
+
+        self.touched()
+
+    // The next of the edges: the plane, then a torus, then dead edges, then the plane again — the
+    // plane left out under a rule that cannot run on it.
+    cycle_edges(*self)
+        if self.on_plane
+            self.to_grid(Torus)
+        elif self.grid.edges == Torus
+            self.grid.edges = Bounded
+        elif plane_runs(self.rule)
+            self.to_plane()
+        else
+            self.grid.edges = Torus
+
+        self.touched()
+
+    // Fit the view to the pattern on the next frame; on the grid, to the whole grid.
+    fit(*self)
+        if self.on_plane then self.fitting = true else self.placed = false
+
+        self.touched()
+
+    // Move onto the plane, the grid's centre on the origin and the view where it was.
+    to_plane(*self)
+        self.copy_to_plane()
+        self.on_plane = true
+        self.cx = -i64(self.grid.width / 2)
+        self.cy = -i64(self.grid.height / 2)
+
+    // Move onto the grid with `edges`, the origin on the grid's centre and the view where it was. Cells
+    // beyond the grid's region are dropped, and the message says how many.
+    to_grid(*self, edges: Edges)
+        val g = self.grid
+        val left = i64(g.width / 2)
+        val top = i64(g.height / 2)
+        val before = self.plane.population()
+
+        self.grid.clear()
+        self.grid.edges = edges
+
+        for y in 0..<g.height
+            for x in 0..<g.width
+                if self.plane.get(i64(x) - left, i64(y) - top) then self.grid.set(x, y, true)
+
+        self.ox += real(-left - self.cx) * self.zoom
+        self.oy += real(-top - self.cy) * self.zoom
+        self.on_plane = false
+        self.plane.clear()
+
+        val dropped = before - self.grid.population()
+
+        if dropped > 0 then self.message.set(s"${dropped} cells beyond the ${g.width}×${g.height} grid were dropped")
+
+    // Leave the plane for a torus if `rule` cannot run on it.
+    private leave_plane_for(*self, rule: Rule)
+        if self.on_plane && !plane_runs(rule)
+            self.to_grid(Torus)
+            self.message.set(s"${rule.notation()} cannot run on the unbounded plane: on a torus instead")
+
+    // The grid's cells onto the plane, its centre on the origin.
+    private copy_to_plane(*self)
+        val g = self.grid
+        val left = i64(g.width / 2)
+        val top = i64(g.height / 2)
+
+        self.plane.clear()
+
+        for y in 0..<g.height
+            for x in 0..<g.width
+                if g.get(x, y) then self.plane.set(i64(x) - left, i64(y) - top, true)
+
+    // Whole cells of the plane camera's offset moved into its corner cell, leaving each offset in
+    // `(-zoom, 0]`.
+    private settle(*self)
+        val kx = (-self.ox / self.zoom).floor()
+        val ky = (-self.oy / self.zoom).floor()
+
+        self.cx += i64(kx)
+        self.cy += i64(ky)
+        self.ox += kx * self.zoom
+        self.oy += ky * self.zoom
 end Model
 
 model(g: Grid, rule: Rule) -> &Model =
-    Model(g, rule, false, 3, 4.0, 0.0, 0.0, false, 0.0, false, 0, rng(1, 1), signal(0),
-          signal(rule.notation()), signal(""))
+    Model(g, plane(), false, rule, false, 3, 4.0, 0.0, 0.0, 0, 0, false, false, 0.0, false, 0, rng(1, 1),
+          signal(0), signal(rule.notation()), signal(""))
 
 // The whole window: the board, then the status line and the rule field under it.
 screen(m: &Model) -> &View =
@@ -100,14 +228,26 @@ screen(m: &Model) -> &View =
             text_field(m.rule_text, RULE_FIELD, 160, "B3/S23"),
             button("apply", () -> m.use_rule(m.rule_text.read())),
         ], 10).padding(8),
-        text(if m.message.read() != "" then m.message.read() else HINT).pad(left = 8, bottom = 8),
+        text(if m.message.read() != "" then m.message.read() elif m.on_plane then PLANE_HINT else HINT)
+            .pad(left = 8, bottom = 8),
     ])
 
 const HINT: string = "space run · n step · +/- speed · r random · c clear · t edges · 1-4 rules · 5-9, 0 patterns"
+const PLANE_HINT: string = "space run · n step · +/- speed · r random · c clear · t edges · f fit · 1-4 rules · 5-9, 0 patterns"
 
+// The status line. On the plane it gives the box the live cells lie in, as its size and its north-west
+// cell, the origin being where the grid's centre was.
 status(m: &Model) -> string
-    val edges = if m.grid.edges == Torus then "torus" else "bounded"
     val state = if m.running then s"${SPEEDS[m.speed]}/s" else "paused"
+
+    if m.on_plane
+        val box = m.plane.bounds() match
+            Some((west, north, east, south)) -> s"${east - west + 1}×${south - north + 1} at ${west}, ${north}"
+            None -> "empty"
+
+        return s"gen ${m.generation.read()}   pop ${m.plane.population()}   ${m.rule.notation()}   plane   box ${box}   ${state}"
+
+    val edges = if m.grid.edges == Torus then "torus" else "bounded"
 
     s"gen ${m.generation.read()}   pop ${m.grid.population()}   ${m.rule.notation()}   ${edges}   ${state}"
 
@@ -124,6 +264,10 @@ impl View for Board
         val g = m.grid
 
         m.typing = c.focus() != NOBODY
+
+        if m.on_plane
+            paint_plane(m, c, r)
+            return
 
         // The first frame fits the whole grid in the board and centres it.
         if !m.placed
@@ -201,6 +345,135 @@ impl View for Board
             m.oy = real(py) - real(r.y) - cy * next
     end paint
 
+// The plane drawn into the board: only the tiles under it are looked at, and a row's run of live cells
+// is one rectangle even where it crosses from one tile into the next.
+private paint_plane(m: &Model, c: *Canvas, r: Rect)
+    if m.fitting
+        fit_plane(m, r)
+        m.fitting = false
+
+    // The first frame shows the region the grid would have, centred on the origin, at the grid's zoom;
+    // so does a fit to an empty plane.
+    if !m.placed
+        val g = m.grid
+
+        m.zoom = max(1.0, min(real(r.w) / real(g.width), real(r.h) / real(g.height)).floor())
+        m.ox = (real(r.w) - m.zoom * real(g.width)) / 2.0
+        m.oy = (real(r.h) - m.zoom * real(g.height)) / 2.0
+        m.cx = -i64(g.width / 2)
+        m.cy = -i64(g.height / 2)
+        m.placed = true
+
+    m.settle()
+    c.fill(r, BOARD)
+    c.clip(r)
+
+    val p = m.plane
+    val z = m.zoom
+    val left = real(r.x) + m.ox
+    val top = real(r.y) + m.oy
+    // How many cells across and down from the corner cell land inside the board.
+    val across = i64(((real(r.right()) - left) / z).ceil())
+    val down = int(((real(r.bottom()) - top) / z).ceil())
+    val gap = if z >= 6.0 then 1 else 0
+    val west = m.cx
+    val east = m.cx + across
+    var slots: Buf[int] = buf()
+    var band = i64(0)
+
+    for j in 0..<down
+        val y = m.cy + i64(j)
+        val py = int(top + real(j) * z)
+        val h = max(1, int(top + real(j + 1) * z) - py - gap)
+
+        // The slots of the tiles along this row, looked up once for each row of tiles.
+        if j == 0 || y >> 6 != band
+            band = y >> 6
+            slots.clear()
+
+            for tx in (west >> 6)..((east - 1) >> 6)
+                slots.push(p.slot(tx, band))
+
+        // The run being drawn, cells `start ..< upto`, carried from one tile into the next while it
+        // continues.
+        var start = i64(0)
+        var upto = i64(0)
+
+        for t in 0..<slots.len()
+            val base = ((west >> 6) + i64(t)) * 64
+            var w = p.row(slots[t], int(y & 63)) & span(west - base, east - base)
+
+            while w != 0
+                val s = w.trailing_zeros()
+                val n = (~(w >> u64(s))).trailing_zeros()
+                val from = base + i64(s)
+
+                if from != upto
+                    if upto > start then fill_run(c, m, left, py, h, gap, start, upto)
+
+                    start = from
+
+                upto = from + i64(n)
+                w = if s + n >= 64 then 0 else w & ~((u64(1) << u64(s + n)) - 1)
+
+        if upto > start then fill_run(c, m, left, py, h, gap, start, upto)
+
+    c.unclip()
+
+    if c.tapped(r)
+        val (tx, ty) = c.tap_point()
+
+        m.toggle(m.cx + i64(((real(tx) - left) / z).floor()), m.cy + i64(((real(ty) - top) / z).floor()))
+
+    val (dx, dy) = c.drag(r, 0, 3, 3)
+
+    m.ox += real(dx)
+    m.oy += real(dy)
+
+    val (_, wy) = c.wheel(r)
+
+    if wy != 0
+        val (px, py) = c.pointer()
+        val next = clamp(z * (1.0 + real(wy) / 200.0), 0.25, 64.0)
+        val ax = (real(px) - left) / z
+        val ay = (real(py) - top) / z
+
+        m.zoom = next
+        m.ox = real(px) - real(r.x) - ax * next
+        m.oy = real(py) - real(r.y) - ay * next
+end paint_plane
+
+// Cells `start ..< end` of a row drawn as one rectangle, the plane's columns counted from the corner
+// cell at `left`.
+private fill_run(c: *Canvas, m: &Model, left: real, py: int, h: int, gap: int, start: i64, end: i64)
+    val px = int(left + real(start - m.cx) * m.zoom)
+
+    c.fill(Rect(px, py, max(1, int(left + real(end - m.cx) * m.zoom) - px - gap), h), LIVE)
+
+// The bits of a tile's row from `lo` up to `hi`, each clamped into the row.
+private span(lo: i64, hi: i64) -> u64 = below(hi) & ~below(lo)
+
+// The bits under `n`.
+private below(n: i64) -> u64 = if n <= 0 then 0 elif n >= 64 then ~u64(0) else (u64(1) << u64(n)) - 1
+
+// The view zoomed and moved so the live cells' box fills the board with a cell to spare round it; on
+// an empty plane, the first frame's view.
+private fit_plane(m: &Model, r: Rect)
+    m.plane.bounds() match
+        Some((west, north, east, south)) ->
+            val w = real(east - west + 1)
+            val h = real(south - north + 1)
+            var z = clamp(min(real(r.w) / (w + 2.0), real(r.h) / (h + 2.0)), 0.25, 64.0)
+
+            if z >= 1.0 then z = z.floor()
+
+            m.zoom = z
+            m.cx = west
+            m.cy = north
+            m.ox = (real(r.w) - z * w) / 2.0
+            m.oy = (real(r.h) - z * h) / 2.0
+        None -> m.placed = false
+
 // The colour a cell in `state` is drawn in: a table's own colours, or the one colour of a live cell,
 // which the dying states of a Generations rule, and the decaying ones of Larger than Life and Weighted
 // Life, fade from toward the board's. A cyclic rule's states go round a colour wheel.
@@ -271,16 +544,13 @@ shortcut(m: &Model, e: Event) -> bool
         m.speed = max(0, m.speed - 1)
         m.touched()
     elif key == SCANCODE_R
-        // A cyclic rule starts from every colour at once, as MCell's cyclic rules want.
-        if m.rule is Cyclic(c) then m.grid.randomize_states(&m.random, c.states) else m.grid.randomize(&m.random, 30)
-
-        m.generation.set(0)
+        m.randomize()
     elif key == SCANCODE_C
-        m.grid.clear()
-        m.generation.set(0)
+        m.clear()
     elif key == SCANCODE_T
-        m.grid.edges = if m.grid.edges == Torus then Bounded else Torus
-        m.touched()
+        m.cycle_edges()
+    elif key == SCANCODE_F
+        m.fit()
     elif key >= SCANCODE_1 && key < SCANCODE_1 + 9
         val i = usize(key - SCANCODE_1)
         val rules = preset_rules()

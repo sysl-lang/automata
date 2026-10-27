@@ -68,6 +68,18 @@ struct Pattern
             return
 
         self.stamp(g, left, top)
+
+    // Draw it on the plane centred on the origin, where `stamp_centred` puts it on a grid of even size
+    // whose centre is the origin, so the plane's first frame is the grid's. The plane is two-state, so
+    // a cell in any state but 0 is alive.
+    stamp_origin(self, p: *Plane)
+        val left = i64((self.width + 1) / 2)
+        val top = i64((self.height + 1) / 2)
+
+        for i in 0..<self.live.len()
+            val c = self.live[i]
+
+            p.set(i64(c.x) - left, i64(c.y) - top, true)
 end Pattern
 
 // Read an RLE pattern. A refusal is a diagnostic whose span points into `text`.

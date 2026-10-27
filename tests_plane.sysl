@@ -1,0 +1,428 @@
+@tests
+
+// The unbounded plane, checked against the grid it must agree with wherever the grid is big enough
+// that nothing reaches its edges, against the known motion of the glider, and against its own promise
+// that memory follows the population: tiles come and go with the cells.
+
+import sh.sysl.ui.{Rect, render, pluto_canvas, fraction}
+import sh.sysl.ui_sdl.system_font
+import sh.sysl.plutovg
+import sh.sysl.plutovg.Surface
+import sysl.buf.{Buf, buf}
+import sysl.rand.rng
+
+private life() -> Rule = parse_rule("B3/S23").unwrap()
+
+// Grid cell `x`, `y` is plane cell `x - size / 2 + dx`, `y - size / 2 + dy`: the grid's centre on
+// `dx`, `dy`. Both are run `n` generations, compared every generation by population, which counts
+// every plane cell and so catches one that strayed outside the grid's region, and cell by cell every
+// tenth generation and at the end.
+private agrees(g: Grid, rule: Rule, n: int, dx: i64, dy: i64)
+    // A copy of its own, since a grid's buffers are shared by every copy of the struct.
+    var t = grid(g.width, g.height, g.edges)
+    var p = plane()
+    val half = i64(g.width / 2)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if g.get(x, y)
+                t.set(x, y, true)
+                p.set(i64(x) - half + dx, i64(y) - half + dy, true)
+
+    for i in 1..n
+        t.step(rule)
+        p.step(rule)
+        assert_eq(p.population(), t.population(), s"generation ${i}")
+
+        if i % 10 == 0 || i == n
+            for y in 0..<t.height
+                for x in 0..<t.width
+                    assert(p.get(i64(x) - half + dx, i64(y) - half + dy) == t.get(x, y), s"generation ${i}, cell ${x}, ${y}")
+
+// A square torus of side `size` with `rle` stamped at its centre.
+private torus_with(rle: string, size: int) -> Grid
+    var g = grid(size, size, Torus)
+
+    parse_rle(rle).unwrap().stamp_centred(&g)
+    g
+
+// A torus of side `size` with a random soup over its middle `side` × `side` cells.
+private soup(size: int, side: int, seed: u64) -> Grid
+    var g = grid(size, size, Torus)
+    var r = rng(seed, 1)
+    val at = (size - side) / 2
+
+    for y in 0..<side
+        for x in 0..<side
+            if r.below(100) < 35 then g.set(at + x, at + y, true)
+
+    g
+
+// The glider, turned to travel toward `sx`, `sy` (each 1 or -1).
+private glider(p: *Plane, sx: i64, sy: i64)
+    for (x, y) in [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
+        p.set(sx * i64(x), sy * i64(y), true)
+
+// -- the plane against a torus -----------------------------------------------------------------------
+
+@test("the plane runs the R-pentomino, the acorn and the gun as a torus too big to wrap does")
+plane_matches_torus()
+    agrees(torus_with(R_PENTOMINO, 256), life(), 300, 0, 0)
+    agrees(torus_with(ACORN, 384), life(), 400, 0, 0)
+    agrees(torus_with(GOSPER_GUN, 256), life(), 200, 0, 0)
+
+@test("the plane agrees with the torus wherever the pattern sits, across tile seams and far off")
+plane_matches_torus_anywhere()
+    val g = soup(160, 40, 7)
+
+    val spots: [](i64, i64) = [(0, 0), (32, 32), (63, -64), (-1000, 5000), (1 << 40, -(1 << 40))]
+
+    for (dx, dy) in spots
+        agrees(g, life(), 120, dx, dy)
+
+@test("the plane runs other B/S rules as the torus does: HighLife, Seeds, Day & Night")
+plane_matches_torus_rules()
+    agrees(torus_with(R_PENTOMINO, 256), parse_rule("B36/S23").unwrap(), 200, 5, -9)
+    agrees(soup(160, 8, 3), parse_rule("B2/S").unwrap(), 30, 0, 0)
+    agrees(soup(200, 40, 11), parse_rule("B3678/S34678").unwrap(), 100, -70, 70)
+
+@test("the plane runs isotropic non-totalistic rules as the torus does")
+plane_matches_torus_isotropic()
+    agrees(soup(200, 40, 5), parse_rule("B3/S23-a").unwrap(), 100, 0, 0)
+    agrees(soup(200, 40, 9), parse_rule("B36-k/S23").unwrap(), 100, -33, 31)
+    agrees(torus_with(ACORN, 256), parse_rule("B3-cnqy/S23").unwrap(), 100, 64, 64)
+
+// -- the glider --------------------------------------------------------------------------------------
+
+@test("a glider runs 10 000 generations in every direction, a quarter cell a generation, on a few tiles")
+plane_glider_travels()
+    for (sx, sy) in [(1, 1), (-1, 1), (1, -1), (-1, -1)]
+        var p = plane()
+
+        glider(&p, sx, sy)
+
+        val (w0, n0, e0, s0) = p.bounds().unwrap()
+
+        for i in 0..<10000
+            p.step(life())
+            assert(p.tile_count() <= 4, s"generation ${i + 1}: ${p.tile_count()} tiles")
+
+        val (w, n, e, s) = p.bounds().unwrap()
+
+        assert_eq(p.population(), 5)
+        assert_eq((w, n, e, s), (w0 + 2500 * sx, n0 + 2500 * sy, e0 + 2500 * sx, s0 + 2500 * sy))
+
+        // The shape too, not only its box: it is the glider it started as, moved.
+        var q = plane()
+
+        glider(&q, sx, sy)
+
+        for y in n0..s0
+            for x in w0..e0
+                assert(p.get(x + 2500 * sx, y + 2500 * sy) == q.get(x, y), s"direction ${sx}, ${sy}: cell ${x}, ${y}")
+
+        // The tiles it left behind were given back: never more slots than a glider and its reach.
+        assert(p.slot_count() <= 9, s"${p.slot_count()} slots")
+
+// -- tiles come and go -------------------------------------------------------------------------------
+
+@test("a pattern that dies gives back every tile, and the slots are handed out again")
+plane_frees_dead_tiles()
+    var p = plane()
+
+    // A lone cell in a tile's corner brings three neighbours in for the step, and dies.
+    p.set(63, 63, true)
+    assert_eq(p.tile_count(), 1)
+    p.step(life())
+    assert_eq(p.population(), 0)
+    assert_eq(p.tile_count(), 0)
+    assert_eq(p.bounds(), None)
+
+    val slots = p.slot_count()
+
+    assert_eq(slots, 4)
+
+    // A blinker straddling four tiles reuses the slots rather than growing the buffers.
+    for (x, y) in [(-1, -1), (0, -1), (1, -1)]
+        p.set(x, y, true)
+
+    for i in 0..<20
+        p.step(life())
+
+    assert_eq(p.population(), 3)
+    assert_eq(p.slot_count(), slots)
+    assert(p.tile_count() <= 4)
+
+@test("clearing a tile's last cell gives the tile back, and a dead cell set dead brings none in")
+plane_set_frees()
+    var p = plane()
+
+    p.set(5, 5, false)
+    assert_eq(p.tile_count(), 0)
+    p.set(5, 5, true)
+    p.set(6, 5, true)
+    assert_eq(p.tile_count(), 1)
+    p.set(5, 5, false)
+    assert_eq(p.tile_count(), 1)
+    p.toggle(6, 5)
+    assert_eq(p.tile_count(), 0)
+    assert_eq(p.population(), 0)
+
+@test("negative and far coordinates land in the tiles they name, and nowhere else")
+plane_negative_coordinates()
+    var p = plane()
+
+    p.set(-1, -1, true)
+    assert(p.get(-1, -1))
+    assert(!p.get(-1, 0))
+    assert(!p.get(0, -1))
+    assert(!p.get(-65, -1))
+    assert(!p.get(63, 63))
+    assert_eq(p.bounds(), Some((-1, -1, -1, -1)))
+    assert_eq(p.slot(-1, -1), 0)
+
+    p.set(-64, -64, true)
+    assert_eq(p.tile_count(), 1)
+    p.set(-65, 64, true)
+    assert_eq(p.tile_count(), 2)
+    assert_eq(p.bounds(), Some((-65, -64, -1, 64)))
+
+    val far: i64 = 1 << 50
+
+    p.set(far, -far, true)
+    assert(p.get(far, -far))
+    assert(!p.get(-far, far))
+    assert_eq(p.bounds(), Some((-65, -far, far, 64)))
+    assert_eq(p.population(), 4)
+
+@test("a blinker at negative coordinates across a tile corner oscillates with period 2")
+plane_blinker_negative()
+    var p = plane()
+
+    for y in -1..1
+        p.set(0, y, true)
+
+    p.step(life())
+    assert_eq(p.bounds(), Some((-1, 0, 1, 0)))
+    p.step(life())
+    assert_eq(p.bounds(), Some((0, -1, 0, 1)))
+    assert_eq(p.population(), 3)
+
+// -- which rules run on the plane --------------------------------------------------------------------
+
+@test("B/S and isotropic rules run on the plane, B0 and every other kind of rule do not")
+plane_rules()
+    for text in ["B3/S23", "B36/S23", "B2/S", "B3/S23-a", "B2-a/S12"]
+        assert(plane_runs(parse_rule(text).unwrap()), text)
+
+    for text in ["B0/S8", "B03/S23", "B0/S2-a", "/2/3", "W110", "B3/S23/C3", "R5,C0,M1,S34..58,B34..45,NM"]
+        assert(!plane_runs(parse_rule(text).unwrap()), text)
+
+@test("the plane is the default under a B/S rule; --torus, --bounded, B0 and #WRAP choose the grid")
+plane_default()
+    val rle = parse_rle(GLIDER).unwrap()
+    val wrapped = parse_mcl("#MCell 4.20\n#GAME Life\n#RULE 23/3\n#WRAP 1\n#L .A\n").unwrap()
+    val plain = options(["automata"]).unwrap()
+
+    assert(starts_on_plane(plain, rle, life()))
+    assert(!starts_on_plane(options(["automata", "--torus"]).unwrap(), rle, life()))
+    assert(!starts_on_plane(options(["automata", "--bounded"]).unwrap(), rle, life()))
+    assert(!starts_on_plane(plain, rle, parse_rule("B0/S8").unwrap()))
+    assert(!starts_on_plane(plain, rle, parse_rule("/2/3").unwrap()))
+    assert(!starts_on_plane(plain, wrapped, life()))
+
+    val t = options(["automata", "--torus", "--torus"]).unwrap()
+
+    assert(t.edged && t.edges == Torus)
+    assert(options(["automata", "--bounded"]).unwrap().edges == Bounded)
+
+@test("--torus and --bounded together are refused, in either order")
+plane_edges_conflict()
+    assert_eq(options(["automata", "--torus", "--bounded"]).unwrap_err(), "--torus and --bounded both give the edges; give one")
+    assert(options(["automata", "--bounded", "--torus"]).is_err())
+
+// -- the viewer on the plane -------------------------------------------------------------------------
+
+@test("t cycles plane, torus, dead edges and back, keeping the cells and the generation")
+plane_cycle_edges()
+    val m = model(grid(64, 48, Torus), life())
+
+    m.start(parse_rle(GLIDER).unwrap(), true)
+    m.advance(8)
+
+    val before = m.plane.bounds()
+
+    m.cycle_edges()
+    assert(!m.on_plane && m.grid.edges == Torus)
+    assert_eq(m.grid.population(), 5)
+    m.cycle_edges()
+    assert(!m.on_plane && m.grid.edges == Bounded)
+    m.cycle_edges()
+    assert(m.on_plane)
+    assert_eq(m.plane.bounds(), before)
+    assert_eq(m.generation.read(), 8)
+    assert(status(m).contains("plane   box 3×3 at 0, 0"), status(m))
+
+@test("under a rule that cannot run on the plane, t cycles torus and dead edges only")
+plane_cycle_without_plane()
+    val m = model(grid(16, 16, Torus), parse_rule("B0/S8").unwrap())
+
+    m.cycle_edges()
+    assert(!m.on_plane && m.grid.edges == Bounded)
+    m.cycle_edges()
+    assert(!m.on_plane && m.grid.edges == Torus)
+
+@test("a rule that cannot run on the plane moves the viewer onto a torus, and says so")
+plane_rule_falls_back()
+    val m = model(grid(64, 48, Torus), life())
+
+    m.start(parse_rle(GLIDER).unwrap(), true)
+    m.use_rule("B0/S8")
+    assert(!m.on_plane && m.grid.edges == Torus)
+    assert_eq(m.grid.population(), 5)
+    assert(m.message.read().contains("cannot run on the unbounded plane"), m.message.read())
+
+    // A pattern naming such a rule does the same.
+    val n = model(grid(64, 48, Torus), life())
+
+    n.start(parse_rle(GLIDER).unwrap(), true)
+    n.load(parse_rle(STAR_WARS).unwrap())
+    assert(!n.on_plane)
+    assert(n.grid.population() > 0)
+
+@test("leaving the plane drops the cells beyond the grid's region, and says how many")
+plane_leaving_drops()
+    val m = model(grid(16, 16, Torus), life())
+
+    m.start(parse_rle(GLIDER).unwrap(), true)
+    m.plane.set(1000, 0, true)
+    m.plane.set(-9, 0, true)
+    m.cycle_edges()
+    assert_eq(m.grid.population(), 5)
+    assert_eq(m.message.read(), "2 cells beyond the 16×16 grid were dropped")
+
+@test("loading, clearing and tapping on the plane stay on the plane, about the origin")
+plane_model_edits()
+    val m = model(grid(32, 32, Torus), life())
+
+    m.start(parse_rle(GLIDER).unwrap(), true)
+    assert_eq(m.plane.bounds(), Some((-2, -2, 0, 0)))
+    m.load(parse_rle(R_PENTOMINO).unwrap())
+    assert(m.on_plane)
+    assert_eq(m.plane.population(), 5)
+    m.toggle(500, 500)
+    assert(m.plane.get(500, 500))
+    m.clear()
+    assert_eq(m.plane.population(), 0)
+    assert(status(m).contains("box empty"), status(m))
+
+// `Model.randomize` asks `self.rule is Cyclic(c)`, and sysl 0.7.2 hangs or traps on an `is` test
+// that binds a payload holding a `Buf` when the value is another variant.
+@test("a random soup on the plane stays on the plane, over the grid's region about the origin",
+      ignore: "sysl 0.7.2 miscompiles `if x is V(c)` where V's payload holds a Buf")
+plane_model_random()
+    val m = model(grid(32, 32, Torus), life())
+
+    m.start(parse_rle(GLIDER).unwrap(), true)
+    m.randomize()
+    assert(m.on_plane)
+
+    val (w, n, e, s) = m.plane.bounds().unwrap()
+
+    assert(w >= -16 && n >= -16 && e < 16 && s < 16)
+    assert(m.plane.population() > 100)
+
+@test("a random soup on a torus fills the grid under a B/S rule",
+      ignore: "sysl 0.7.2 miscompiles `if x is V(c)` where V's payload holds a Buf")
+grid_model_random()
+    val m = model(grid(32, 32, Torus), life())
+
+    m.randomize()
+    assert(m.grid.population() > 100)
+
+// -- what the plane draws ----------------------------------------------------------------------------
+
+// The model's whole window drawn as `--shot` draws it.
+private frame(m: &Model) -> &Surface
+    val surf = plutovg.surface(WIDTH, HEIGHT).expect("a drawing surface")
+    val vg = plutovg.canvas(surf).expect("a drawing canvas")
+    val face = plutovg.font(system_font()).expect("a font")
+    var c = pluto_canvas(vg, face, 15.0)
+
+    surf.clear(fraction(GROUND, 16), fraction(GROUND, 8), fraction(GROUND, 0))
+    render(screen(m), &c, Rect(0, 0, WIDTH, HEIGHT))
+    surf
+
+// Which pixels are exactly the live cells' colour.
+private live_pixels(s: &Surface) -> Buf[bool]
+    val d = s.data()
+    var out: Buf[bool] = buf()
+
+    for y in 0..<s.height()
+        for x in 0..<s.width()
+            val i = usize(y * s.stride() + x * 4)
+
+            out.push(d[i] == 0xA8 && d[i + 1] == 0xD3 && d[i + 2] == 0x8B)
+
+    out
+
+private count(b: Buf[bool]) -> int
+    var n = 0
+
+    for i in 0..<b.len()
+        if b[i] then n += 1
+
+    n
+
+private same(a: Buf[bool], b: Buf[bool]) -> bool
+    for i in 0..<a.len()
+        if a[i] != b[i] then return false
+
+    true
+
+@test("the plane's first frame draws the cells where the torus's does, runs whole across tile seams")
+plane_draws_as_torus()
+    // Zoomed far enough in that a run split at a tile's edge would show a gap.
+    for (size, rle) in [((100, 60), GOSPER_GUN), ((192, 144), ACORN)]
+        val (w, h) = size
+        val p = parse_rle(rle).unwrap()
+        val t = model(grid(w, h, Torus), life())
+        val m = model(grid(w, h, Torus), life())
+
+        t.start(p, false)
+        m.start(p, true)
+
+        // A line across the tile seams, so runs must join.
+        for x in -(w / 2 - 5)..(w / 2 - 5)
+            t.grid.set(x + w / 2, h / 2 + 20, true)
+            m.plane.set(i64(x), 20, true)
+
+        val a = live_pixels(frame(t))
+        val b = live_pixels(frame(m))
+
+        assert(count(a) > 1000, s"${count(a)} live pixels")
+        assert(same(a, b))
+
+        // Leaving the plane and coming back keeps the picture where it was.
+        m.cycle_edges()
+        assert(same(live_pixels(frame(m)), a))
+        m.cycle_edges()
+        m.cycle_edges()
+        assert(same(live_pixels(frame(m)), a))
+
+@test("f brings a pattern that has travelled out of view back into it")
+plane_fit()
+    val m = model(grid(64, 48, Torus), life())
+
+    m.start(parse_rle(GLIDER).unwrap(), true)
+    assert(count(live_pixels(frame(m))) > 0)
+    m.advance(4000)
+    assert_eq(count(live_pixels(frame(m))), 0)
+    m.fit()
+    assert(count(live_pixels(frame(m))) > 0)
+
+    // An empty plane fits to the first frame's view.
+    m.clear()
+    m.fit()
+    frame(m)
+    assert(m.zoom >= 1.0)

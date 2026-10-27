@@ -5,8 +5,9 @@
 //     sysl run . -- --shot frame.png
 //
 // The grid is stepped 64 cells per machine word by bit-sliced neighbour counting, under any rule
-// written in B/S notation, on a torus or with dead edges; isotropic non-totalistic rules (Hensel
-// notation, `B2-a/S12`) run through a 512-entry table a cell at a time. Generations rules (`/2/3`)
+// written in B/S notation, on an unbounded plane of 64×64 tiles, a torus or a grid with dead edges;
+// isotropic non-totalistic rules (Hensel notation, `B2-a/S12`) run through a 512-entry table a cell at
+// a time. Generations rules (`/2/3`)
 // count on the live cells' bits and age the dying ones a byte apiece; Wolfram's elementary rules
 // (`W110`) write the grid a row a generation. Golly `.rule` tables and trees (`--rule-file`) run on a
 // byte per cell. Patterns are read from RLE.
