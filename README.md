@@ -386,4 +386,5 @@ The Golly Gang and free software under the GNU General Public License, version 2
 three files are distributed under those terms, not ISC. `rules/Immigration.rule` and
 `rules/QuadLife.rule` are LifeWiki's (`Rule:Immigration` and `Rule:QuadLife` at conwaylife.com),
 unchanged but for a description naming their source; LifeWiki's content is available under the GNU
-Free Documentation License 1.2, and these two files are distributed under those terms, not ISC.
+Free Documentation License 1.2, and these two files are distributed under those terms, not ISC; the
+licence's text is in `LICENSE-GFDL-1.2`.
