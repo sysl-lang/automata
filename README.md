@@ -1,7 +1,7 @@
 # automata
 
-Life-like cellular automata in [sysl](https://github.com/sysl-lang/sysl): a bit-packed grid that steps
-64 cells per machine word, any rule written in B/S notation, RLE patterns, and a
+Cellular automata in [sysl](https://github.com/sysl-lang/sysl): a bit-packed grid that steps
+64 cells per machine word, any rule written in B/S notation, Golly rule tables, RLE patterns, and a
 [syslUI](https://github.com/sysl-lang/syslui) viewer.
 
 ![The Gosper glider gun after 60 generations](shot.png)
@@ -35,10 +35,41 @@ RLE header, or the field under the board. `B3/S23`, `S23/B3` and the older `23/3
 the character that broke it, on stderr from the command line and in the status area in the viewer.
 Isotropic non-totalistic notation (`B2a/S12`) is recognised and refused by name.
 
+## Rule files
+
+```
+sysl run . -- --rule-file rules/WireWorld.rule --pattern patterns/diodes.rle --size 32x10
+sysl run . -- --rule-file rules/Life.rule --pattern 4
+```
+
+`--rule-file` loads a rule in Golly's [`.rule` format](https://golly.sourceforge.io/Help/formats.html#rule).
+Of its sections, three are read:
+
+- **`@RULE`** names the rule, and the status line shows the name.
+- **`@TABLE`**: `n_states` (2 to 256), `neighborhood` (`Moore` or `vonNeumann`; `hexagonal` and
+  `oneDimensional` are refused by name), `symmetries` (`none`, `rotate4`, `rotate8`,
+  `reflect_horizontal`, `rotate4reflect`, `rotate8reflect`, `permute`), `var` declarations (a set may
+  name earlier variables, and a variable written twice in one transition is the same state both
+  times), and transitions with commas or as bare digits. The first matching transition wins; a cell
+  none matches keeps its state.
+- **`@COLORS`**: `state r g b` lines and six-number gradient lines, over Golly's default red-to-yellow
+  gradient.
+
+Every other section — `@TREE`, `@ICONS`, `@NAMES` — is skipped, as Golly skips one it does not know,
+and a file whose rule is only a `@TREE` is refused. A malformed file is refused with a diagnostic at
+its line and column. The table is expanded once, when the file is read, into an array indexed by a
+cell's state and its neighbours', so a step is one lookup per cell; that limits a table to 2²⁴
+entries, which is up to 6 states for Moore and 27 for von Neumann.
+
+`rules/` holds `Life.rule` (Life as a `permute` table, which the tests run against B3/S23 bit for bit)
+and `WireWorld.rule`.
+
 ## Patterns
 
 RLE as Golly and LifeWiki write it: `#` lines (`#N` names the pattern), the `x = , y = , rule =`
-header, runs of `b` and `o`, `$` and `!`. The reader is built on
+header, runs of `b` and `o`, `$` and `!`. Multi-state patterns use Golly's letters: `.` for state 0,
+`A`–`X` for 1–24, and `pA`…`yO` above them. A header whose rule is a name (`rule = WireWorld`) needs
+the rule's file given with `--rule-file`. The reader is built on
 [`parsing`](https://github.com/sysl-lang/parsing). Five patterns are bundled: glider, R-pentomino,
 acorn, Gosper glider gun and pulsar.
 

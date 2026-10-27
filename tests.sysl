@@ -15,6 +15,7 @@ private naive_step(g: Grid, rule: Rule) -> Grid
 
     val (birth, survive) = rule match
         LifeLike(b, s) -> (b, s)
+        Table(_) -> panic("the naive step is B/S rules' oracle")
 
     for y in 0..<g.height
         for x in 0..<g.width
@@ -299,10 +300,13 @@ rle_errors()
         ("x = 3, y = 1\n4o!", "wider than the header's x = 3", 13),
         ("x = 2, y = 1\nbo$o!", "more rows than the header's y = 1", 16),
         ("x = 3, y = 3\nbo$2bo", "without its closing `!`", 19),
-        ("x = 3, y = 3\nbAo!", "`A` is not `b`, `o`, `$` or `!`", 14),
+        ("x = 3, y = 3\nbZo!", "`Z` is not a cell", 14),
+        ("x = 3, y = 3\nbpZ!", "`p` begins a state", 14),
+        ("x = 3, y = 3\nyP!", "`y` begins a state", 13),
         ("x = 3, y = 3\n0o!", "at least 1", 13),
         ("x = 3, y = 3, rule = B9/S23\n!", "8 neighbours", 22),
-        ("x = 3, y = 3, rule = Life\n!", "expected a rule", 21),
+        ("x = 3, y = 3, rule = B3S23\n!", "expected `/`", 23),
+        ("x = 3, y = 3, rule = Life:T10\n!", "expected a rule", 21),
         ("x = 3, y = 3 junk\n!", "unexpected text after the header", 13),
     ]
 

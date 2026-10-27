@@ -139,6 +139,11 @@ impl View for Board
 
         c.stroke(Rect(int(left) - 1, int(top) - 1, int(z * real(g.width)) + 2, int(z * real(g.height)) + 2), EDGE)
 
+        // A rule table gives state 0 a colour of its own, which the whole grid is laid in first.
+        m.rule match
+            Table(t) -> c.fill(Rect(int(left), int(top), int(z * real(g.width)), int(z * real(g.height))), t.colours[0])
+            LifeLike(_, _) -> ()
+
         // Only the rows and columns that land inside the board are looked at.
         val y0 = max(0, int(((real(r.y) - top) / z).floor()))
         val y1 = min(g.height, int(((real(r.bottom()) - top) / z).ceil()))
@@ -153,15 +158,17 @@ impl View for Board
             var x = x0
 
             while x < x1
-                if g.get(x, y)
+                val state = g.state(x, y)
+
+                if state != 0
                     val start = x
 
-                    while x < x1 && g.get(x, y)
+                    while x < x1 && g.state(x, y) == state
                         x += 1
 
                     val px = int(left + real(start) * z)
 
-                    c.fill(Rect(px, py, max(1, int(left + real(x) * z) - px - gap), h), LIVE)
+                    c.fill(Rect(px, py, max(1, int(left + real(x) * z) - px - gap), h), colour_of(m.rule, state))
                 else
                     x += 1
 
@@ -191,6 +198,12 @@ impl View for Board
             m.ox = real(px) - real(r.x) - cx * next
             m.oy = real(py) - real(r.y) - cy * next
     end paint
+
+// The colour a cell in `state` is drawn in: a table's own colours, or the one colour of a live cell.
+private colour_of(rule: Rule, state: u8) -> u32 =
+    rule match
+        Table(t) -> t.colours[usize(state)]
+        LifeLike(_, _) -> LIVE
 
 // What a frame does on its own: run as many generations as the speed owes.
 tick(m: &Model, dt: real)

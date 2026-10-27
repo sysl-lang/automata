@@ -11,8 +11,11 @@
 // `!` ending the pattern. Whitespace and line breaks between items are ignored, and so is everything
 // after the `!`.
 //
-// This reader takes two-state patterns: a letter other than `b` and `o` (a multi-state cell) is
-// refused rather than guessed at.
+// **A pattern with more than two states writes them as Golly does**: `.` is state 0, `A` to `X` are
+// states 1 to 24, and a lower-case letter from `p` to `y` in front moves on by 24 for each step past
+// `o` — `pA` is 25, `qA` is 49, up to `yO`, 255. `b` and `o` are `.` and `A` again, so a two-state
+// pattern is one of these. Such a pattern's header names its rule (`rule = WireWorld`) rather than
+// spelling it, and the rule itself comes from a rule file.
 
 import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, read_digits, scanner_of, where}
 import sysl.buf.{Buf, buf}
@@ -20,14 +23,17 @@ import sysl.buf.{Buf, buf}
 struct Cell
     x: int
     y: int
+    state: u8
 
 struct Pattern
     name: string
     width: int
     height: int
-    // The rule the header names, if it names one.
+    // The rule the header names, if it gives one in B/S notation.
     rule: Option[Rule]
-    // The live cells, relative to the pattern's top-left corner.
+    // The rule the header names by name instead, such as `WireWorld`, or "".
+    rule_name: string
+    // The cells not in state 0, relative to the pattern's top-left corner.
     live: Buf[Cell]
 
     // Draw the pattern into `g` with its top-left corner at `x`, `y`. Cells off a bounded grid are
@@ -36,7 +42,16 @@ struct Pattern
         for i in 0..<self.live.len()
             val c = self.live[i]
 
-            g.set(x + c.x, y + c.y, true)
+            if c.state == 1 then g.set(x + c.x, y + c.y, true) else g.set_state(x + c.x, y + c.y, c.state)
+
+    // The highest state any cell is in, 0 for an empty pattern.
+    most_state(self) -> u8
+        var most: u8 = 0
+
+        for i in 0..<self.live.len()
+            if self.live[i].state > most then most = self.live[i].state
+
+        most
 
     // Draw it centred.
     stamp_centred(self, g: *Grid) = self.stamp(g, (g.width - self.width) / 2, (g.height - self.height) / 2)
@@ -73,6 +88,7 @@ parse_rle(text: string) -> Result[Pattern, Diagnostic]
 
     val height = header_number(&s, u8('y'))?
     var rule: Option[Rule] = None
+    var rule_name = ""
 
     s.skip_blanks()
 
@@ -89,9 +105,14 @@ parse_rle(text: string) -> Result[Pattern, Diagnostic]
 
         s.skip_to_line_end()
 
-        parse_rule(text[m..<s.offset]) match
-            Ok(r) -> rule = Some(r)
-            Err(d) -> return Err(shifted(d, m))
+        val given = text[m..<s.offset].trim()
+
+        if names_a_rule(given)
+            rule_name = given
+        else
+            parse_rule(text[m..<s.offset]) match
+                Ok(r) -> rule = Some(r)
+                Err(d) -> return Err(shifted(d, m))
 
     s.skip_blanks()
 
@@ -101,8 +122,24 @@ parse_rle(text: string) -> Result[Pattern, Diagnostic]
 
     read_body(&s, width, height, live)?
 
-    Ok(Pattern(name, width, height, rule, live))
+    Ok(Pattern(name, width, height, rule, rule_name, live))
 end parse_rle
+
+// Whether a header's rule is a name, as Golly's rule files are named, rather than B/S notation: a
+// letter, then letters, digits, `-` and `_`, and not a `B` or `S` followed by a count or a `/`.
+private names_a_rule(text: string) -> bool
+    val b = text.bytes
+
+    if b.len == 0 || !b[0].is_alpha() then return false
+
+    val letter = b[0] | 0x20
+
+    if b.len > 1 && (letter == u8('b') || letter == u8('s')) && (b[1].is_digit() || b[1] == u8('/')) then return false
+
+    for i in 0..<b.len
+        if !b[i].is_alnum() && b[i] != u8('-') && b[i] != u8('_') then return false
+
+    true
 
 // `x = 3` or `y = 3`, with blanks anywhere between.
 private header_number(s: *Scanner, key: u8) -> Result[int, Diagnostic]
@@ -151,16 +188,17 @@ private read_body(s: *Scanner, width: int, height: int, live: Buf[Cell]) -> Resu
             Some(c) -> c
             None -> return Err(error(s.here(), "the pattern ends without its closing `!`"))
 
+        val state = cell_state(s)?
         val at = Span(m, s.offset + 1)
 
-        if tag == u8('b') || tag == u8('o')
+        if state >= 0
             if x + n > width then return Err(error(at, s"row ${y + 1} is wider than the header's x = ${width}"))
 
-            if tag == u8('o')
+            if state > 0
                 if y >= height then return Err(error(at, s"more rows than the header's y = ${height}"))
 
                 for i in 0..<n
-                    live.push(Cell(x + i, y))
+                    live.push(Cell(x + i, y, u8(state)))
 
             x += n
         elif tag == u8('$')
@@ -171,10 +209,33 @@ private read_body(s: *Scanner, width: int, height: int, live: Buf[Cell]) -> Resu
             return Ok(())
         else
             return Err(error(Span(s.offset, s.offset + 1),
-                s"`${char(tag)}` is not `b`, `o`, `$$` or `!`; this reader takes two-state patterns"))
+                s"`${char(tag)}` is not a cell (`b`, `o`, `.`, `A`…`X`, `pA`…`yO`), `$$` or `!`"))
 
         s.bump()
 end read_body
+
+// The state of the cell at the cursor, leaving the cursor on its last letter; -1 if what is there is
+// not a cell.
+private cell_state(s: *Scanner) -> Result[int, Diagnostic]
+    val c = s.peek().unwrap()
+
+    if c == u8('b') || c == u8('.') then return Ok(0)
+
+    if c == u8('o') then return Ok(1)
+
+    if c >= u8('A') && c <= u8('X') then return Ok(int(c - u8('A')) + 1)
+
+    if c < u8('p') || c > u8('y') then return Ok(-1)
+
+    val at = Span(s.offset, s.offset + 2)
+    val letter = s.peek_at(1).unwrap_or(0)
+    val state = 24 * int(c - u8('o')) + int(letter - u8('A')) + 1
+
+    if letter < u8('A') || letter > u8('X') || state > 255
+        return Err(error(at, s"`${char(c)}` begins a state from `${char(c)}A`, and is followed by `A` to `X` up to state 255"))
+
+    s.bump()
+    Ok(state)
 
 // A diagnostic about a piece of a text, moved to where that piece sits in the whole.
 private shifted(d: Diagnostic, by: usize) -> Diagnostic =

@@ -1,4 +1,4 @@
-// A two-state grid, packed one cell per bit, stepped a whole machine word at a time.
+// A grid, packed one cell per bit, stepped a whole machine word at a time under a two-state rule.
 //
 // **Cell `x` of a row is bit `x % 64` of word `x / 64`**, and a row is as many words as its width
 // needs. The bits past the width in a row's last word are always zero: every step masks them off, and
@@ -9,8 +9,14 @@
 // summed by bit-sliced addition into four words holding a 4-bit count per cell. Comparing that count
 // against the rule's births and survivals is a handful of ANDs per count, so a word's 64 cells cost
 // what one cell would cost done naively.
+//
+// **A rule table has more than two states, so beside the bits is a byte per cell.** The bits always
+// say which cells are not in state 0, whatever the rule; the bytes hold each cell's state, and are
+// only kept up while a table is running or a cell has been set to a state above 1. A two-state step
+// never touches them, and marks them stale instead.
 
 import sysl.buf.{Buf, buf_filled}
+import sysl.math.min
 import sysl.rand.Rng
 
 // What lies beyond the grid's edges.
@@ -29,9 +35,14 @@ struct Grid
     cells: Buf[u64]
     // The other generation, written by `step` and then swapped in.
     spare: Buf[u64]
+    // Each cell's state, row by row, a byte apiece, and the other generation of them.
+    states: Buf[u8]
+    spare_states: Buf[u8]
+    // Whether `states` holds every cell's state. When it does not, a cell's state is its bit.
+    fresh: bool
 
-    // Is the cell at `x`, `y` alive? Coordinates outside the grid wrap on a torus and are dead when
-    // bounded.
+    // Is the cell at `x`, `y` alive — in any state but 0? Coordinates outside the grid wrap on a
+    // torus and are dead when bounded.
     get(self, x: int, y: int) -> bool
         self.inside(x, y) match
             Some((cx, cy)) -> (self.cells[self.word_at(cx / 64, cy)] >> u64(cx % 64)) & 1 == 1
@@ -45,6 +56,24 @@ struct Grid
                 val bit = u64(1) << u64(cx % 64)
 
                 self.cells[i] = if alive then self.cells[i] | bit else self.cells[i] & ~bit
+
+                if self.fresh then self.states[self.byte_at(cx, cy)] = if alive then 1 else 0
+            None -> ()
+
+    // The state of the cell at `x`, `y`, the coordinates resolved as `get` resolves them.
+    state(self, x: int, y: int) -> u8
+        self.inside(x, y) match
+            Some((cx, cy)) ->
+                if self.fresh then self.states[self.byte_at(cx, cy)] elif self.get(cx, cy) then 1 else 0
+            None -> 0
+
+    // Put the cell at `x`, `y` in `state`, the coordinates resolved as `set` resolves them.
+    set_state(*self, x: int, y: int, state: u8)
+        self.inside(x, y) match
+            Some((cx, cy)) ->
+                self.keep_states()
+                self.set(cx, cy, state != 0)
+                self.states[self.byte_at(cx, cy)] = state
             None -> ()
 
     toggle(*self, x: int, y: int) = self.set(x, y, !self.get(x, y))
@@ -52,6 +81,8 @@ struct Grid
     clear(*self)
         for i in 0..<self.cells.len()
             self.cells[i] = 0
+
+        self.fresh = false
 
     // How many cells are alive.
     population(self) -> int
@@ -77,12 +108,68 @@ struct Grid
         for i in 0..<self.cells.len()
             if self.cells[i] != other.cells[i] then return false
 
+        if !self.fresh && !other.fresh then return true
+
+        for y in 0..<self.height
+            for x in 0..<self.width
+                if self.state(x, y) != other.state(x, y) then return false
+
         true
 
     // Advance one generation under `rule`.
     step(*self, rule: Rule)
         rule match
-            LifeLike(b, s) -> self.step_life_like(b, s)
+            LifeLike(b, s) ->
+                self.step_life_like(b, s)
+                self.fresh = false
+            Table(t) -> self.step_table(t)
+
+    // One generation under a rule table: a cell's state and its neighbours' make an index, and the
+    // table holds what the cell becomes there. Then the bits are brought into line with the bytes.
+    private step_table(*self, t: RuleTable)
+        self.keep_states()
+
+        val ring = t.neighbourhood.ring()
+        val n = t.states
+
+        for y in 0..<self.height
+            for x in 0..<self.width
+                val at = self.byte_at(x, y)
+                var index = int(self.states[at])
+                var weight = n
+
+                for i in 0..<ring.len
+                    val (dx, dy) = ring[i]
+
+                    index += weight * int(self.state(x + dx, y + dy))
+                    weight *= n
+
+                self.spare_states[at] = t.next[usize(index)]
+
+        val done = self.states
+
+        self.states = self.spare_states
+        self.spare_states = done
+
+        for y in 0..<self.height
+            for k in 0..<self.stride
+                var word: u64 = 0
+
+                for b in 0..<min(64, self.width - k * 64)
+                    if self.states[self.byte_at(k * 64 + b, y)] != 0 then word |= u64(1) << u64(b)
+
+                self.cells[self.word_at(k, y)] = word
+    end step_table
+
+    // Make `states` hold every cell's state, from the bits if it has gone stale.
+    private keep_states(*self)
+        if self.fresh then return
+
+        for y in 0..<self.height
+            for x in 0..<self.width
+                self.states[self.byte_at(x, y)] = if self.get(x, y) then 1 else 0
+
+        self.fresh = true
 
     private step_life_like(*self, birth: u16, survive: u16)
         val tail = self.tail_mask()
@@ -176,6 +263,8 @@ struct Grid
 
     private word_at(self, k: int, y: int) -> usize = usize(y * self.stride + k)
 
+    private byte_at(self, x: int, y: int) -> usize = usize(y * self.width + x)
+
     // The cell `x`, `y` names, or nothing if it is off a bounded grid.
     private inside(self, x: int, y: int) -> Option[(int, int)]
         if x >= 0 && x < self.width && y >= 0 && y < self.height then return Some((x, y))
@@ -190,7 +279,10 @@ grid(width: int, height: int, edges: Edges) -> Grid
     val stride = (width + 63) / 64
     val words = usize(stride * height)
 
-    Grid(width, height, edges, stride, buf_filled(words, 0), buf_filled(words, 0))
+    val cells = usize(width * height)
+
+    Grid(width, height, edges, stride, buf_filled(words, 0), buf_filled(words, 0), buf_filled(cells, 0),
+         buf_filled(cells, 0), false)
 
 // `x` reduced into `0..<n`, for a negative `x` as well.
 wrap(x: int, n: int) -> int = ((x % n) + n) % n

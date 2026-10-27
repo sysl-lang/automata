@@ -1,6 +1,8 @@
-// Life-like cellular automata: a bit-packed grid, any B/S rule, RLE patterns, and a syslUI viewer.
+// Cellular automata: a bit-packed grid, any B/S rule, Golly rule tables, RLE patterns, and a syslUI
+// viewer.
 //
-//     automata [--rule <B…/S…>] [--pattern <1-5 | file.rle>] [--size <w>x<h>] [--bounded]
+//     automata [--rule <B…/S…> | --rule-file <file.rule>] [--pattern <1-5 | file.rle>]
+//              [--size <w>x<h>] [--bounded]
 //     automata --shot <png> [--generations <n>] [same options]
 //
 // `--shot` draws one frame with no window at all, after running the pattern for a fixed number of
@@ -20,6 +22,7 @@ const HEIGHT: int = 720
 // What the command line asked for.
 struct Options
     rule: string
+    rule_file: string
     pattern: string
     width: int
     height: int
@@ -31,7 +34,7 @@ main(args: []string) -> Result[unit, string]
     val o = options(args)?
     val p = pattern_of(o.pattern)?
 
-    val rule = chosen_rule(o.rule, p)?
+    val rule = if o.rule_file == "" then chosen_rule(o.rule, p)? else rule_file(o.rule_file, o.rule, p)?
     var g = grid(o.width, o.height, o.edges)
 
     p.stamp_centred(&g)
@@ -65,15 +68,31 @@ main(args: []string) -> Result[unit, string]
 end main
 
 // The rule to start under: the one given with `--rule` if there was one, else the pattern's own, else
-// Life. A `--rule` that does not read is refused with the diagnostic drawn under the text.
+// Life. A `--rule` that does not read is refused with the diagnostic drawn under the text, and so is a
+// pattern whose rule is a name, which only a rule file can supply.
 chosen_rule(given: string, p: Pattern) -> Result[Rule, string]
     if given != ""
         return parse_rule(given).map_err(d -> s"--rule could not be read\n${d.render(source_of("--rule", given))}")
 
+    if p.rule.is_none() && p.rule_name != ""
+        return Err(s"the pattern's rule is `${p.rule_name}`, which is a rule file's name: give the file with --rule-file")
+
     Ok(p.rule.unwrap_or(LifeLike(0b1000, 0b1100)))
 
+// The rule table in the file at `file`, which must have every state the pattern uses.
+rule_file(file: string, given: string, p: Pattern) -> Result[Rule, string]
+    if given != "" then return Err("--rule and --rule-file both give the rule; give one")
+
+    val text = read_text(file).map_err(e -> s"${file}: ${e}")?
+    val t = parse_rule_file(text).map_err(d -> s"${file} is not a rule file this can read\n${d.render(source_of(file, text))}")?
+
+    if int(p.most_state()) >= t.states
+        return Err(s"the pattern has cells in state ${p.most_state()}, and ${t.name}'s states are 0 to ${t.states - 1}")
+
+    Ok(Table(t))
+
 private options(args: []string) -> Result[Options, string]
-    var o = Options("", "4", 192, 144, Torus, "", 100)
+    var o = Options("", "", "4", 192, 144, Torus, "", 100)
     var i = 1
 
     while i < args.len
@@ -90,6 +109,8 @@ private options(args: []string) -> Result[Options, string]
 
         if flag == "--rule"
             o.rule = value
+        elif flag == "--rule-file"
+            o.rule_file = value
         elif flag == "--pattern"
             o.pattern = value
         elif flag == "--shot"

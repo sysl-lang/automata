@@ -1,0 +1,6 @@
+#N WireWorld diodes
+#C Two six-cell clocks, each sending an electron down a wire every six generations. The upper wire
+#C runs through a diode that passes electrons left to right; the lower one's diode is turned round,
+#C and stops them. Run with --rule-file rules/WireWorld.rule.
+x = 25, y = 7, rule = WireWorld
+.BA8.2C$C2.9C.12C$.2C8.2C2$.BA9.2C$C2.9C.12C$.2C9.2C!

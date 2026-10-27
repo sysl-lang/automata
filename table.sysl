@@ -1,0 +1,687 @@
+// Rule tables in Golly's `.rule` format: its @RULE, @TABLE and @COLORS sections.
+//
+//     @RULE WireWorld
+//     @TABLE
+//     n_states:4
+//     neighborhood:Moore
+//     symmetries:rotate8
+//     var a={0,1,2,3}
+//     1,a,b,c,d,e,f,g,h,2
+//     @COLORS
+//     1 0 128 255
+//
+// A table is a list of transitions, each one a cell's state, its neighbours' states clockwise from
+// north, and the state the cell becomes. An entry is a state or a variable standing for a set of
+// them, and **a variable written twice in one transition is the same state both times**. The first
+// transition that matches a cell, in any arrangement its symmetries allow, says what the cell
+// becomes; a cell no transition matches stays as it is.
+//
+// **The transitions are run once, here, and never again.** Every combination of a cell and its
+// neighbours is looked up while the file is read and the answer stored in a flat array indexed by
+// the states themselves, so a step costs one load per cell however many transitions the file has.
+// That bounds the table at 2^24 entries — n_states to the power of the neighbourhood's size plus one
+// — which is six states for Moore and twenty-seven for von Neumann.
+//
+// Other sections — @TREE, @ICONS, @NAMES and whatever Golly adds next — are skipped, as Golly skips
+// a section it does not know.
+
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, read_digits, scanner_of, where, nearest_name,
+                        is_ident_start, is_ident_cont}
+import sysl.buf.{Buf, buf, buf_filled}
+import sysl.slices.{contains, index_of}
+
+// The most entries an expanded table may have.
+const MOST_ENTRIES: int = 1 << 24
+
+// Golly's default colours for the live states: a gradient from red to yellow.
+const FIRST_LIVE: u32 = 0xFF0000
+const LAST_LIVE: u32 = 0xFFFF00
+
+enum Neighbourhood
+    // The eight cells around, clockwise from north: N, NE, E, SE, S, SW, W, NW.
+    Moore
+    // The four orthogonal cells, clockwise from north: N, E, S, W.
+    VonNeumann
+
+    // Each neighbour's offset from the cell, in the order a transition lists them.
+    ring(self) -> [](int, int)
+        self match
+            Moore -> [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)]
+            VonNeumann -> [(0, -1), (1, 0), (0, 1), (-1, 0)]
+
+    size(self) -> int = if self == Moore then 8 else 4
+
+    // The spelling a transition's entries are listed in, for a diagnostic.
+    order(self) -> string = if self == Moore then "C,N,NE,E,SE,S,SW,W,NW,C'" else "C,N,E,S,W,C'"
+
+struct RuleTable
+    name: string
+    states: int
+    neighbourhood: Neighbourhood
+    // What a cell becomes, at index `c + n·s₁ + n²·s₂ + …` for its own state `c` and its
+    // neighbours' states `s₁, s₂, …` in ring order, `n` being the number of states.
+    next: Buf[u8]
+    // Each state's colour, as 0xRRGGBB.
+    colours: Buf[u32]
+
+    // What a cell in state `cells[0]` becomes when its neighbours are `cells[1..]`, in ring order.
+    lookup(self, cells: []int) -> u8
+        var index = 0
+        var weight = 1
+
+        for i in 0..<cells.len
+            index += weight * cells[i]
+            weight *= self.states
+
+        self.next[usize(index)]
+
+// An entry of a transition.
+private enum Term
+    // Exactly this state.
+    Fixed(state: int)
+    // The variable with this number: any state of its set, and the same one wherever it recurs.
+    Bound(v: int)
+
+// A section of the file.
+private enum Section
+    Doc
+    Transitions
+    Colours
+    Skipped
+
+// A line of @COLORS: one state's colour, or a gradient over every live state.
+private struct ColourLine
+    state: int
+    gradient: bool
+    first: u32
+    last: u32
+
+// Everything read so far.
+private struct Reader
+    text: string
+    name: string
+    states: int
+    states_at: Span
+    hood: Option[Neighbourhood]
+    symmetry: string
+    symmetry_at: Span
+    // Whether the first variable or transition has been seen, after which the settings are fixed.
+    body: bool
+    names: Buf[string]
+    sets: Buf[u256]
+    // Every transition's entries, one after another, `width` apiece.
+    terms: Buf[Term]
+    colours: Buf[ColourLine]
+
+    // Entries per transition: the cell, its neighbours, and what it becomes.
+    width(self) -> int = self.hood.unwrap().size() + 2
+
+// Read a rule file. A refusal is a diagnostic whose span points into `text`.
+parse_rule_file(text: string) -> Result[RuleTable, Diagnostic]
+    var r = Reader(text, "", 0, Span(0, 0), None, "none", Span(0, 0), false, buf(), buf(), buf(), buf())
+    var s = scanner_of(text)
+    var section = Doc
+    var table_at: Option[Span] = None
+    var tree_at: Option[Span] = None
+
+    while !s.at_end()
+        val start = s.offset
+
+        s.skip_to_line_end()
+
+        var stop = s.offset
+
+        s.accept_newline()
+
+        // A `#` ends what a line says, in every section this reads.
+        for i in start..<stop
+            if text.bytes[i] == u8('#')
+                stop = i
+                break
+
+        var line = Scanner(text.bytes[0..<stop], start)
+
+        line.skip_blanks()
+
+        if line.at_end() then continue
+
+        if line.accept(u8('@'))
+            val word = line.read_ident(is_ident_start, is_ident_cont).map(w -> text[w.start..<w.end]).unwrap_or("")
+            val at = Span(start, line.offset)
+
+            if r.name == "" && word != "RULE" then return Err(error(at, "a rule file begins with `@RULE <name>`"))
+
+            if word == "RULE"
+                if r.name != "" then return Err(error(at, "a second @RULE"))
+
+                line.skip_blanks()
+
+                val m = line.mark()
+
+                line.skip_to_line_end()
+                r.name = text[m..<line.offset].trim()
+
+                if r.name == "" then return Err(error(line.here(), "the @RULE line names the rule: `@RULE <name>`"))
+
+                section = Doc
+            elif word == "TABLE"
+                if table_at.is_some() then return Err(error(at, "a second @TABLE"))
+
+                table_at = Some(at)
+                section = Transitions
+            elif word == "COLORS"
+                section = Colours
+            else
+                if word == "TREE" then tree_at = Some(at)
+
+                section = Skipped
+
+            continue
+
+        if r.name == "" then return Err(error(Span(start, stop), "a rule file begins with `@RULE <name>`"))
+
+        section match
+            Transitions -> table_line(&r, &line)?
+            Colours -> colour_line(&r, &line)?
+            _ -> ()
+
+    if r.name == "" then return Err(error(s.here(), "a rule file begins with `@RULE <name>`"))
+
+    val at = table_at match
+        Some(t) -> t
+        None ->
+            tree_at match
+                Some(t) -> return Err(error(t, "this rule is a @TREE, and this reader runs @TABLE rules"))
+                None -> return Err(error(s.here(), "the file has no @TABLE section"))
+
+    if !r.body then settle(&r, at)?
+
+    Ok(RuleTable(r.name, r.states, r.hood.unwrap(), expand(r), colours_of(r)))
+end parse_rule_file
+
+// One line of @TABLE: a setting, a variable, or a transition.
+private table_line(r: *Reader, s: *Scanner) -> Result[unit, Diagnostic]
+    val start = s.mark()
+
+    s.read_ident(is_ident_start, is_ident_cont) match
+        Some(w) ->
+            val word = r.text[w.start..<w.end]
+
+            s.skip_blanks()
+
+            if s.accept(u8(':')) then return setting(r, s, word, w)
+
+            if word == "var" then return variable(r, s, Span(start, s.offset))
+
+            s.reset(start)
+        None -> ()
+
+    transition(r, s, Span(start, s.offset))
+
+// `n_states:`, `neighborhood:` or `symmetries:`, which come before any variable or transition.
+private setting(r: *Reader, s: *Scanner, key: string, key_at: Span) -> Result[unit, Diagnostic]
+    if r.body then return Err(error(key_at, s"`${key}:` must come before the first variable or transition"))
+
+    s.skip_blanks()
+
+    val m = s.mark()
+
+    if key == "n_states"
+        val n = read_number(s)?
+
+        if n < 2 || n > 256 then return Err(error(s.span_from(m), s"n_states is ${n}; Golly's tables have 2 to 256 states"))
+
+        r.states = n
+        r.states_at = s.span_from(m)
+    else
+        val word = s.read_ident(is_ident_start, is_ident_cont).map(w -> r.text[w.start..<w.end]).unwrap_or("")
+        val at = s.span_from(m)
+
+        if word == "" then return Err(error(s.here(), s"`${key}:` needs a value"))
+
+        if key == "neighborhood"
+            if word == "Moore"
+                r.hood = Some(Moore)
+            elif word == "vonNeumann"
+                r.hood = Some(VonNeumann)
+            elif word == "hexagonal" || word == "oneDimensional"
+                return Err(error(at, s"the ${word} neighbourhood is Golly's, but this reader runs Moore and vonNeumann"))
+            else
+                return Err(error(at, s"unknown neighbourhood `${word}`; Golly's are Moore, vonNeumann, hexagonal and oneDimensional"))
+        elif key == "symmetries"
+            if !contains(SYMMETRIES, word)
+                return Err(error(at, s"unknown symmetries `${word}`; they are ${SYMMETRY_LIST}"))
+
+            r.symmetry = word
+            r.symmetry_at = at
+        else
+            return Err(error(key_at, s"unknown setting `${key}:`; a table's settings are n_states, neighborhood and symmetries"))
+
+    end_of_line(s)
+end setting
+
+private val SYMMETRIES = ["none", "rotate4", "rotate8", "reflect_horizontal", "rotate4reflect", "rotate8reflect", "permute"]
+private const SYMMETRY_LIST: string = "none, rotate4, rotate8, reflect_horizontal, rotate4reflect, rotate8reflect and permute"
+
+// The settings are complete once the first variable or transition arrives: check that they are
+// there and agree with one another.
+private settle(r: *Reader, at: Span) -> Result[unit, Diagnostic]
+    if r.states == 0 then return Err(error(at, "`n_states:` must be given before the first variable or transition"))
+
+    val hood = r.hood match
+        Some(h) -> h
+        None -> return Err(error(at, "`neighborhood:` must be given before the first variable or transition"))
+
+    if hood == VonNeumann && r.symmetry.starts_with("rotate8")
+        return Err(error(r.symmetry_at, s"${r.symmetry} turns a Moore neighbourhood in eighths; vonNeumann has four neighbours"))
+
+    // The expanded table is n^(size + 1) entries, which must stay within MOST_ENTRIES.
+    var entries = 1
+
+    for i in 0..hood.size()
+        entries *= r.states
+
+        if entries > MOST_ENTRIES
+            return Err(error(r.states_at,
+                s"${r.states} states in a ${if hood == Moore then "Moore" else "vonNeumann"} neighbourhood make a table too large to expand; this reader takes up to ${if hood == Moore then 6 else 27}"))
+
+    r.body = true
+    Ok(())
+end settle
+
+// `var a={0,1,2}`: a name for a set of states, which may include earlier variables' sets.
+private variable(r: *Reader, s: *Scanner, line: Span) -> Result[unit, Diagnostic]
+    if !r.body then settle(r, line)?
+
+    s.skip_blanks()
+
+    val w = s.read_ident(is_ident_start, is_ident_cont) match
+        Some(w) -> w
+        None -> return Err(error(s.here(), "expected a variable's name after `var`"))
+
+    val name = r.text[w.start..<w.end]
+
+    if contains(r.names.view(), name) then return Err(error(w, s"the variable `${name}` is already defined"))
+
+    s.skip_blanks()
+
+    if !s.accept(u8('=')) then return Err(error(s.here(), s"expected `=` after `var ${name}`"))
+
+    s.skip_blanks()
+
+    val braced = s.accept(u8('{'))
+    var set: u256 = 0
+
+    loop
+        s.skip_blanks()
+
+        val term = read_term(r, s)?
+
+        set |= term match
+            Fixed(n) -> u256(1) << u256(n)
+            Bound(v) -> r.sets[usize(v)]
+
+        s.skip_blanks()
+
+        if !braced || !s.accept(u8(',')) then break
+
+    if braced && !s.accept(u8('}')) then return Err(error(s.here(), "expected `,` or `}` in the variable's set"))
+
+    r.names.push(name)
+    r.sets.push(set)
+    end_of_line(s)
+end variable
+
+// A transition: the cell, each neighbour, and what the cell becomes, either separated by commas or,
+// with no variables and fewer than eleven states, as one digit apiece.
+private transition(r: *Reader, s: *Scanner, line: Span) -> Result[unit, Diagnostic]
+    if !r.body then settle(r, line)?
+
+    val width = r.width()
+    val hood = r.hood.unwrap()
+    val arity = s"a ${if hood == Moore then "Moore" else "vonNeumann"} transition has ${width} entries, ${hood.order()}"
+    val first = r.terms.len()
+    val commas = s.rest().contains(",".bytes)
+    var count = 0
+    var last = s.here()
+
+    if !commas && !s.peek().map(c -> c.is_digit()).unwrap_or(false)
+        return Err(error(Span(s.offset, s.offset + 1), "expected a transition, a variable or a setting"))
+
+    if !commas && r.states > 10
+        return Err(error(line, s"with ${r.states} states, a transition's entries are separated by commas"))
+
+    loop
+        s.skip_blanks()
+
+        if s.at_end() then break
+
+        val m = s.mark()
+        val term = if commas then read_term(r, s)? else read_digit(r, s)?
+
+        if count == width then return Err(error(s.span_from(m), s"${arity}; this one has more"))
+
+        r.terms.push(term)
+        count += 1
+        last = s.span_from(m)
+        s.skip_blanks()
+
+        if commas && !s.at_end() && !s.accept(u8(','))
+            return Err(error(s.here(), "expected `,` between a transition's entries"))
+
+    if count < width then return Err(error(s.here(), s"${arity}; this one has ${count}"))
+
+    // The output may only be a variable the inputs bind, for otherwise it names no one state.
+    r.terms[r.terms.len() - 1] match
+        Bound(v) ->
+            var bound = false
+
+            for i in first..<r.terms.len() - 1
+                r.terms[i] match
+                    Bound(w) -> if w == v then bound = true
+                    Fixed(_) -> ()
+
+            if !bound
+                return Err(error(last,
+                    s"the result `${r.names[usize(v)]}` is a variable no input binds, so it names no one state"))
+        Fixed(_) -> ()
+
+    Ok(())
+end transition
+
+// A state number or a variable's name.
+private read_term(r: *Reader, s: *Scanner) -> Result[Term, Diagnostic]
+    if s.peek().map(c -> c.is_digit()).unwrap_or(false)
+        val m = s.mark()
+        val n = read_number(s)?
+
+        return Ok(Fixed(in_range(r, n, s.span_from(m))?))
+
+    s.read_ident(is_ident_start, is_ident_cont) match
+        Some(w) ->
+            val name = r.text[w.start..<w.end]
+
+            index_of(r.names.view(), name) match
+                Some(i) -> Ok(Bound(int(i)))
+                None ->
+                    val also = nearest_name(name, r.names).map(n -> s"; did you mean `${n}`?").unwrap_or("")
+
+                    Err(error(w, s"the variable `${name}` is not defined${also}"))
+        None -> Err(error(Span(s.offset, s.offset + 1), "expected a state or a variable"))
+
+// One digit of a transition written without commas.
+private read_digit(r: *Reader, s: *Scanner) -> Result[Term, Diagnostic]
+    val at = Span(s.offset, s.offset + 1)
+    val c = s.peek().unwrap()
+
+    if !c.is_digit()
+        return Err(error(at, "a transition written without commas is all digits; separate the entries with commas to use variables"))
+
+    s.bump()
+    Ok(Fixed(in_range(r, int(c - u8('0')), at)?))
+
+private in_range(r: *Reader, n: int, at: Span) -> Result[int, Diagnostic]
+    if n >= r.states then return Err(error(at, s"there is no state ${n}: n_states is ${r.states}, so the states are 0 to ${r.states - 1}"))
+
+    Ok(n)
+
+// One line of @COLORS: `state r g b`, or `r₁ g₁ b₁ r₂ g₂ b₂` for a gradient over the live states.
+// Anything after the numbers is a description and is ignored, as is a state the table does not have.
+private colour_line(r: *Reader, s: *Scanner) -> Result[unit, Diagnostic]
+    val start = s.offset
+    val numbers: Buf[int] = buf()
+
+    while numbers.len() < 6 && s.peek().map(c -> c.is_digit()).unwrap_or(false)
+        val m = s.mark()
+        val n = read_number(s)?
+
+        if numbers.len() > 0 && n > 255 then return Err(error(s.span_from(m), s"a colour component is 0 to 255, not ${n}"))
+
+        numbers.push(n)
+        s.skip_blanks()
+
+    if numbers.len() == 6 && numbers[0] <= 255
+        r.colours.push(ColourLine(0, true, rgb(numbers[0], numbers[1], numbers[2]), rgb(numbers[3], numbers[4], numbers[5])))
+    elif numbers.len() >= 4
+        r.colours.push(ColourLine(numbers[0], false, rgb(numbers[1], numbers[2], numbers[3]), 0))
+    else
+        return Err(error(Span(start, s.offset), "a colour is `state red green blue`, or six numbers for a gradient"))
+
+    Ok(())
+
+private rgb(r: int, g: int, b: int) -> u32 = u32(r) << 16 | u32(g) << 8 | u32(b)
+
+// A decimal number, held to something a table could mean.
+private read_number(s: *Scanner) -> Result[int, Diagnostic]
+    val m = s.mark()
+
+    read_digits(s, 10) match
+        Ok(n) ->
+            if n > 1_000_000 then return Err(error(s.span_from(m), "the number is larger than anything a table means"))
+
+            Ok(int(n))
+        Err(e) -> Err(error(where(e), "expected a number"))
+
+private end_of_line(s: *Scanner) -> Result[unit, Diagnostic]
+    s.skip_blanks()
+
+    if !s.at_end() then return Err(error(Span(s.offset, s.offset + 1), "unexpected text at the end of the line"))
+
+    Ok(())
+
+// -- expansion ---------------------------------------------------------------------------------------
+
+// Every combination of a cell and its neighbours, looked up once.
+//
+// The combinations are counted through like an odometer, the cell's own state turning fastest, so
+// the index of each is the one `RuleTable.lookup` computes. Under `permute` only the multiset of the
+// neighbours matters, and its first arrangement in that count is the one with the largest states in
+// the least significant places, so every other arrangement copies an answer already worked out.
+private expand(r: Reader) -> Buf[u8]
+    val n = r.states
+    val m = r.hood.unwrap().size()
+    val width = m + 2
+    val permute = r.symmetry == "permute"
+    val group = arrangements(r.symmetry, m)
+    val transitions = int(r.terms.len()) / width
+    var total = 1
+
+    for i in 0..m
+        total *= n
+
+    val next: Buf[u8] = buf_filled(usize(total), 0)
+    val cells: Buf[int] = buf_filled(usize(m + 1), 0)
+    val binding: Buf[int] = buf_filled(r.names.len(), -1)
+    val counts: Buf[int] = buf_filled(usize(n), 0)
+
+    for index in 0..<total
+        if index > 0 then turn(cells, n)
+
+        var out = cells[0]
+
+        if permute
+            val first = first_arrangement(cells, n)
+
+            if first < index
+                next[usize(index)] = next[usize(first)]
+                continue
+
+            for i in 0..<n
+                counts[usize(i)] = 0
+
+            for i in 1..m
+                counts[usize(cells[usize(i)])] += 1
+
+        for t in 0..<transitions
+            val base = t * width
+            var hit = false
+
+            if permute
+                clear(binding)
+                hit = takes(r.terms[usize(base)], cells[0], r.sets, binding) && place(r, base, 0, m, counts, binding)
+            else
+                for g in 0..<int(group.len()) / m
+                    clear(binding)
+
+                    if arranged(r, base, cells, group, g * m, m, binding)
+                        hit = true
+                        break
+
+            if hit
+                out = r.terms[usize(base + width - 1)] match
+                    Fixed(state) -> state
+                    Bound(v) -> binding[usize(v)]
+                break
+
+        next[usize(index)] = u8(out)
+
+    next
+end expand
+
+// The next combination in the count.
+private turn(cells: Buf[int], n: int)
+    for i in 0..<cells.len()
+        cells[i] += 1
+
+        if cells[i] < n then return
+
+        cells[i] = 0
+
+// The index of the arrangement of these neighbours that comes first in the count: the largest states
+// in the least significant places.
+private first_arrangement(cells: Buf[int], n: int) -> int
+    val sorted = cells.copy()
+
+    for i in 2..<sorted.len()
+        var j = i
+
+        while j > 1 && sorted[j - 1] < sorted[j]
+            val t = sorted[j - 1]
+
+            sorted[j - 1] = sorted[j]
+            sorted[j] = t
+            j -= 1
+
+    var index = 0
+    var weight = 1
+
+    for i in 0..<sorted.len()
+        index += weight * sorted[i]
+        weight *= n
+
+    index
+
+private clear(binding: Buf[int])
+    for i in 0..<binding.len()
+        binding[i] = -1
+
+// Whether `state` may stand where `term` is, binding a variable met for the first time.
+private takes(term: Term, state: int, sets: Buf[u256], binding: Buf[int]) -> bool
+    term match
+        Fixed(s) -> s == state
+        Bound(v) ->
+            val i = usize(v)
+
+            if binding[i] >= 0 then return binding[i] == state
+
+            if (sets[i] >> u256(state)) & 1 == 0 then return false
+
+            binding[i] = state
+            true
+
+// Whether the transition at `base` matches `cells` with its neighbours read in the order of one
+// arrangement: entry `i` of the transition against the neighbour `group[at + i]` names.
+private arranged(r: Reader, base: int, cells: Buf[int], group: Buf[int], at: int, m: int, binding: Buf[int]) -> bool
+    if !takes(r.terms[usize(base)], cells[0], r.sets, binding) then return false
+
+    for i in 0..<m
+        val cell = cells[usize(1 + group[usize(at + i)])]
+
+        if !takes(r.terms[usize(base + 1 + i)], cell, r.sets, binding) then return false
+
+    true
+
+// Under `permute`: whether the neighbour entries from `j` on can each be given a different one of the
+// neighbours `counts` has left. The bindings of a match are left in place, for the result to read.
+private place(r: Reader, base: int, j: int, m: int, counts: Buf[int], binding: Buf[int]) -> bool
+    if j == m then return true
+
+    val term = r.terms[usize(base + 1 + j)]
+
+    for state in 0..<int(counts.len())
+        if counts[usize(state)] == 0 then continue
+
+        val fresh = term match
+            Bound(v) -> binding[usize(v)] < 0
+            Fixed(_) -> false
+
+        if !takes(term, state, r.sets, binding) then continue
+
+        counts[usize(state)] -= 1
+
+        if place(r, base, j + 1, m, counts, binding) then return true
+
+        counts[usize(state)] += 1
+
+        if fresh
+            term match
+                Bound(v) -> binding[usize(v)] = -1
+                Fixed(_) -> ()
+
+    false
+end place
+
+// The arrangements a symmetry allows, `m` entries apiece: arrangement `g` reads the transition's
+// neighbour `i` against the cell's neighbour `group[g·m + i]`. A rotation turns the ring; the
+// reflection is left to right, which fixes north and south.
+private arrangements(symmetry: string, m: int) -> Buf[int]
+    val group: Buf[int] = buf()
+    val turns = if symmetry.starts_with("rotate8") then 8 elif symmetry.starts_with("rotate4") then 4 else 1
+    val reflect = symmetry.ends_with("reflect") || symmetry == "reflect_horizontal"
+
+    for t in 0..<turns
+        val by = t * m / turns
+
+        for i in 0..<m
+            group.push((i + by) % m)
+
+        if reflect
+            for i in 0..<m
+                group.push((by - i + m) % m)
+
+    group
+
+// Golly's default colours, then the file's own, in the order it gives them.
+private colours_of(r: Reader) -> Buf[u32]
+    val n = r.states
+    val out: Buf[u32] = buf_filled(usize(n), BOARD)
+
+    gradient(out, FIRST_LIVE, LAST_LIVE)
+
+    for i in 0..<r.colours.len()
+        val c = r.colours[i]
+
+        if c.gradient
+            gradient(out, c.first, c.last)
+        elif c.state < n
+            out[usize(c.state)] = c.first
+
+    out
+
+// The live states' colours, evenly from `first` to `last`.
+private gradient(out: Buf[u32], first: u32, last: u32)
+    val live = int(out.len()) - 1
+
+    for i in 1..live
+        out[usize(i)] = if live == 1 then first else mix(first, last, i - 1, live - 1)
+
+private mix(a: u32, b: u32, k: int, of: int) -> u32
+    var out: u32 = 0
+
+    for shift in [16, 8, 0]
+        val x = int((a >> u32(shift)) & 0xFF)
+        val y = int((b >> u32(shift)) & 0xFF)
+
+        out |= u32(x + (y - x) * k / of) << u32(shift)
+
+    out

@@ -1,0 +1,459 @@
+@tests
+
+// Golly rule tables, checked against what they did not compute themselves: Life written as a table
+// must step exactly as the B/S engine does, WireWorld's electrons must go where working the circuit
+// out by hand says they go, and each symmetry must allow exactly the arrangements it names.
+
+import sysl.rand.rng
+import sysl.text.from_utf8
+
+private val LIFE_RULE = from_utf8(embed("rules/Life.rule")).unwrap()
+private val WIREWORLD_RULE = from_utf8(embed("rules/WireWorld.rule")).unwrap()
+
+private table(text: string) -> RuleTable = parse_rule_file(text).unwrap()
+
+private life_table() -> Rule = Table(table(LIFE_RULE))
+
+private wireworld() -> Rule = Table(table(WIREWORLD_RULE))
+
+private bs_life() -> Rule = parse_rule("B3/S23").unwrap()
+
+// The grid's states, a row at a time, `.` for state 0 and a digit for the others, rows separated by
+// `/`.
+private picture(g: Grid) -> string
+    var out = ""
+
+    for y in 0..<g.height
+        if y > 0 then out = s"${out}/"
+
+        for x in 0..<g.width
+            val s = g.state(x, y)
+
+            out = if s == 0 then s"${out}." else s"${out}${s}"
+
+    out
+
+private stamped(text: string, edges: Edges) -> Grid
+    val p = parse_rle(text).unwrap()
+    var g = grid(p.width, p.height, edges)
+
+    p.stamp(&g, 0, 0)
+    g
+
+private run(g: *Grid, rule: Rule, n: int)
+    for i in 0..<n
+        g.step(rule)
+
+// A table of one transition under the given settings, and how many of the neighbourhoods around a
+// cell in state 0 it fires on.
+private one_line(states: int, hood: string, symmetry: string, line: string) -> RuleTable =
+    table(s"@RULE T\n@TABLE\nn_states:${states}\nneighborhood:${hood}\nsymmetries:${symmetry}\n${line}\n")
+
+private firing(t: RuleTable) -> int
+    val m = t.neighbourhood.size()
+    var cells = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var total = 1
+    var n = 0
+
+    for i in 0..<m
+        total *= t.states
+
+    for k in 0..<total
+        var rest = k
+
+        for i in 0..<m
+            cells[usize(i + 1)] = rest % t.states
+            rest /= t.states
+
+        if t.lookup(cells[0..<usize(m + 1)]) != 0 then n += 1
+
+    n
+
+// The neighbourhood of a dead cell with the given neighbours, by ring position, in state 1.
+private around(t: RuleTable, live: []int) -> u8
+    var cells = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    for i in 0..<live.len
+        cells[usize(live[i] + 1)] = 1
+
+    t.lookup(cells[0..<usize(t.neighbourhood.size() + 1)])
+
+// -- Life as a table against the B/S engine ---------------------------------------------------------
+
+@test("Life.rule steps random grids exactly as B3/S23 does, every width, both edges")
+tbl_life_matches_bs()
+    val widths = [1, 2, 5, 63, 64, 65, 130]
+    val heights = [1, 3, 23]
+    var g = rng(11, 5)
+
+    for w in 0..<widths.len
+        for h in 0..<heights.len
+            for e in [Torus, Bounded]
+                var bits = grid(widths[w], heights[h], e)
+
+                bits.randomize(&g, 40)
+
+                var cells = grid(widths[w], heights[h], e)
+
+                for y in 0..<heights[h]
+                    for x in 0..<widths[w]
+                        cells.set(x, y, bits.get(x, y))
+
+                for gen in 0..<30
+                    bits.step(bs_life())
+                    cells.step(life_table())
+                    assert(cells.same_cells(bits))
+
+@test("Life.rule runs the Gosper gun 200 generations exactly as B3/S23 does, on both edges")
+tbl_life_gun()
+    for e in [Torus, Bounded]
+        var bits = grid(90, 60, e)
+        var cells = grid(90, 60, e)
+        val gun = parse_rle(GOSPER_GUN).unwrap()
+
+        gun.stamp(&bits, 2, 2)
+        gun.stamp(&cells, 2, 2)
+
+        val start = bits.population()
+
+        for gen in 0..<200
+            bits.step(bs_life())
+            cells.step(life_table())
+            assert(cells.same_cells(bits))
+
+        assert(cells.population() > start)
+
+@test("Life.rule reads as a two-state Moore table named Life, coloured as Golly colours one")
+tbl_life_reads()
+    val t = table(LIFE_RULE)
+
+    assert_eq(t.name, "Life")
+    assert_eq(t.states, 2)
+    assert(t.neighbourhood == Moore)
+    assert_eq(t.next.len(), usize(512))
+    assert_eq(t.colours[1], u32(0xFF0000))
+    assert_eq(life_table().notation(), "Life")
+    assert(life_table().same(life_table()))
+    assert(!life_table().same(bs_life()))
+
+// -- WireWorld ---------------------------------------------------------------------------------------
+
+@test("WireWorld reads with four states and the colours its @COLORS gives")
+tbl_wireworld_reads()
+    val t = table(WIREWORLD_RULE)
+
+    assert_eq(t.name, "WireWorld")
+    assert_eq(t.states, 4)
+    assert_eq(t.colours[0], u32(0x303030))
+    assert_eq(t.colours[1], u32(0x0080FF))
+    assert_eq(t.colours[2], u32(0xFFFFFF))
+    assert_eq(t.colours[3], u32(0xFF8000))
+
+@test("an electron runs along a wire one cell a step, head first, and leaves the wire copper")
+tbl_wireworld_wire()
+    var g = stamped("x = 10, y = 1, rule = WireWorld\nBA8C!", Bounded)
+
+    assert_eq(picture(g), "2133333333")
+    run(&g, wireworld(), 5)
+    assert_eq(picture(g), "3333321333")
+    run(&g, wireworld(), 3)
+    assert_eq(picture(g), "3333333321")
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "3333333332")
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "3333333333")
+
+@test("an electron runs down a wire as it runs along one, the table turned")
+tbl_wireworld_down()
+    var g = stamped("x = 1, y = 6, rule = WireWorld\nB$A$C$C$C$C!", Bounded)
+
+    run(&g, wireworld(), 3)
+    assert_eq(picture(g), "3/3/3/2/1/3")
+
+@test("copper with three heads beside it stays copper")
+tbl_wireworld_three_heads()
+    var g = stamped("x = 3, y = 3, rule = WireWorld\nA.A$.C.$..A!", Bounded)
+
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "2.2/.3./..2")
+
+// The diode: an electron from the left splits round the gap and meets again on the far side, where
+// two heads make the copper fire; one from the right comes back round to three heads at once on the
+// input wire's last cell, which three heads leave as copper, and the electron is gone.
+//
+//     ...CC.........
+//     CCCC.CCCCCCCCC
+//     ...CC.........
+@test("a diode passes an electron left to right")
+tbl_wireworld_diode_forward()
+    var g = stamped("x = 14, y = 3, rule = WireWorld\n3.2C$BA2C.9C$3.2C!", Bounded)
+
+    run(&g, wireworld(), 2)
+    assert_eq(picture(g), "...13........./3321.333333333/...13.........")
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "...21........./3332.333333333/...21.........")
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "...32........./3333.133333333/...32.........")
+    run(&g, wireworld(), 6)
+    assert_eq(picture(g), "...33........./3333.333332133/...33.........")
+
+@test("a diode stops an electron right to left")
+tbl_wireworld_diode_backward()
+    var g = stamped("x = 14, y = 3, rule = WireWorld\n3.2C$4C.6CABC$3.2C!", Bounded)
+
+    run(&g, wireworld(), 7)
+    assert_eq(picture(g), "...31........./3333.233333333/...31.........")
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "...12........./3331.333333333/...12.........")
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "...23........./3332.333333333/...23.........")
+    run(&g, wireworld(), 1)
+    assert_eq(picture(g), "...33........./3333.333333333/...33.........")
+
+// -- symmetries --------------------------------------------------------------------------------------
+
+// N, NE and SE alive: a shape no turn or reflection maps to itself, so it has as many arrangements
+// as each symmetry has members.
+@test("each Moore symmetry fires on exactly the arrangements it names")
+tbl_symmetries_moore()
+    val line = "0,1,1,0,1,0,0,0,0,1"
+    val counts = [("none", 1), ("rotate4", 4), ("rotate8", 8), ("reflect_horizontal", 2),
+                  ("rotate4reflect", 8), ("rotate8reflect", 16), ("permute", 56)]
+
+    for i in 0..<counts.len
+        val (symmetry, n) = counts[i]
+
+        assert_eq(firing(one_line(2, "Moore", symmetry, line)), n)
+
+    val none = one_line(2, "Moore", "none", line)
+    val rotate4 = one_line(2, "Moore", "rotate4", line)
+    val rotate8 = one_line(2, "Moore", "rotate8", line)
+    val reflect = one_line(2, "Moore", "reflect_horizontal", line)
+    val both4 = one_line(2, "Moore", "rotate4reflect", line)
+
+    assert_eq(around(none, [0, 1, 3]), 1)
+    // A quarter turn: E, SE, SW.
+    assert_eq(around(none, [2, 3, 5]), 0)
+    assert_eq(around(rotate4, [2, 3, 5]), 1)
+    // An eighth: NE, E, S.
+    assert_eq(around(rotate4, [1, 2, 4]), 0)
+    assert_eq(around(rotate8, [1, 2, 4]), 1)
+    assert_eq(around(both4, [1, 2, 4]), 0)
+    // Left to right: N, NW, SW.
+    assert_eq(around(none, [0, 7, 5]), 0)
+    assert_eq(around(reflect, [0, 7, 5]), 1)
+    assert_eq(around(rotate8, [0, 7, 5]), 0)
+    assert_eq(around(both4, [0, 7, 5]), 1)
+    // Top to bottom is a reflection and a half turn: S, SE, NE.
+    assert_eq(around(reflect, [4, 3, 1]), 0)
+    assert_eq(around(both4, [4, 3, 1]), 1)
+end tbl_symmetries_moore
+
+// N in state 1 and E in state 2: with two different states, a pair of neighbours has a handedness.
+@test("each von Neumann symmetry fires on exactly the arrangements it names")
+tbl_symmetries_von_neumann()
+    val line = "0,1,2,0,0,1"
+    val counts = [("none", 1), ("rotate4", 4), ("reflect_horizontal", 2), ("rotate4reflect", 8), ("permute", 12)]
+
+    for i in 0..<counts.len
+        val (symmetry, n) = counts[i]
+
+        assert_eq(firing(one_line(3, "vonNeumann", symmetry, line)), n)
+
+    val rotate4 = one_line(3, "vonNeumann", "rotate4", line)
+    val reflect = one_line(3, "vonNeumann", "reflect_horizontal", line)
+
+    // E 1, S 2 is the quarter turn; N 1, W 2 the reflection.
+    assert_eq(rotate4.lookup([0, 0, 1, 2, 0]), 1)
+    assert_eq(rotate4.lookup([0, 1, 0, 0, 2]), 0)
+    assert_eq(reflect.lookup([0, 1, 0, 0, 2]), 1)
+    assert_eq(reflect.lookup([0, 0, 1, 2, 0]), 0)
+
+@test("on a grid, a rotate4 table grows the same shape a quarter turn round")
+tbl_symmetry_on_grid()
+    // A dead cell with only its north neighbour alive comes alive, under every quarter turn: a
+    // single cell grows into a plus.
+    val t = Table(one_line(2, "vonNeumann", "rotate4", "0,1,0,0,0,1"))
+    var g = grid(5, 5, Bounded)
+
+    g.set(2, 2, true)
+    g.step(t)
+    assert_eq(picture(g), "...../..1../.111./..1../.....")
+
+// -- the table's semantics ---------------------------------------------------------------------------
+
+@test("a variable written twice is the same state both times")
+tbl_bound_variables()
+    val t = one_line(2, "Moore", "none", "var a={0,1}\n0,a,a,0,0,0,0,0,0,1")
+
+    assert_eq(t.lookup([0, 1, 1, 0, 0, 0, 0, 0, 0]), 1)
+    assert_eq(t.lookup([0, 0, 0, 0, 0, 0, 0, 0, 0]), 1)
+    assert_eq(t.lookup([0, 1, 0, 0, 0, 0, 0, 0, 0]), 0)
+    assert_eq(t.lookup([0, 0, 1, 0, 0, 0, 0, 0, 0]), 0)
+
+@test("a variable as the result is the state its input bound")
+tbl_variable_result()
+    val t = one_line(3, "vonNeumann", "none", "var a={1,2}\n0,a,0,0,0,a")
+
+    assert_eq(t.lookup([0, 1, 0, 0, 0]), 1)
+    assert_eq(t.lookup([0, 2, 0, 0, 0]), 2)
+
+@test("a variable's set may hold another's")
+tbl_nested_variables()
+    val t = one_line(4, "vonNeumann", "none", "var a={1}\nvar b={a,3}\n0,b,0,0,0,1")
+
+    assert_eq(t.lookup([0, 1, 0, 0, 0]), 1)
+    assert_eq(t.lookup([0, 2, 0, 0, 0]), 0)
+    assert_eq(t.lookup([0, 3, 0, 0, 0]), 1)
+
+@test("the first matching transition wins, and an unmatched cell keeps its state")
+tbl_first_match()
+    val t = one_line(3, "vonNeumann", "none", "0,1,0,0,0,2\n0,1,0,0,0,1\nvar a={0,1,2}\n0,a,0,0,0,1")
+
+    assert_eq(t.lookup([0, 1, 0, 0, 0]), 2)
+    assert_eq(t.lookup([0, 2, 0, 0, 0]), 1)
+    assert_eq(t.lookup([2, 1, 0, 0, 0]), 2)
+    assert_eq(t.lookup([1, 0, 0, 0, 0]), 1)
+
+@test("a transition without commas is one digit per entry, and means what the comma form means")
+tbl_bare_digits()
+    val bare = one_line(2, "Moore", "permute", "0111000001\n1110000001\n1111000001")
+    val commas = one_line(2, "Moore", "permute", "0,1,1,1,0,0,0,0,0,1\n1,1,1,0,0,0,0,0,0,1\n1,1,1,1,0,0,0,0,0,1")
+
+    assert(bare.next == commas.next)
+
+@test("comments, blank lines and unknown sections are passed over")
+tbl_skipped()
+    val text = "# a comment before\n@RULE X\nsome documentation\n@TREE\nnum_states=2\n@TABLE\n" +
+               "n_states:2   # two\nneighborhood:vonNeumann\n\n# a comment\n0,1,0,0,0,1  # born\n" +
+               "@ICONS\nXPM nonsense\n@NAMES\n0 dead\n"
+    val t = table(text)
+
+    assert_eq(t.name, "X")
+    assert_eq(t.lookup([0, 1, 0, 0, 0]), 1)
+
+@test("@COLORS sets single states and gradients in order, over Golly's red to yellow")
+tbl_colours()
+    val plain = one_line(4, "vonNeumann", "none", "")
+
+    assert_eq(plain.colours[1], u32(0xFF0000))
+    assert_eq(plain.colours[2], u32(0xFF7F00))
+    assert_eq(plain.colours[3], u32(0xFFFF00))
+
+    val t = table("@RULE X\n@COLORS\n0 0 0 255 1 1 1\n2 10 20 30 two\n9 1 1 1\n@TABLE\nn_states:3\nneighborhood:Moore\n")
+
+    assert_eq(t.colours[1], u32(0x000000))
+    assert_eq(t.colours[2], u32(0x0A141E))
+    assert_eq(t.colours[0], BOARD)
+
+// -- refusals ----------------------------------------------------------------------------------------
+
+@test("a malformed rule file is refused with a diagnostic at the place it went wrong")
+tbl_errors()
+    val head = "@RULE X\n@TABLE\n"
+    val moore = s"${head}n_states:2\nneighborhood:Moore\n"
+    val von = s"${head}n_states:3\nneighborhood:vonNeumann\n"
+    val cases = [
+        ("", "begins with `@RULE", 0),
+        ("@TABLE\n", "begins with `@RULE", 0),
+        ("Life\n", "begins with `@RULE", 0),
+        ("@RULE\n", "names the rule", 5),
+        ("@RULE X\nn_states:2\n", "no @TABLE", 19),
+        ("@RULE X\n@TREE\nnum_states=2\n", "is a @TREE", 8),
+        (s"${head}neighborhood:Moore\n0,0,0,0,0,0,0,0,0,1\n", "`n_states:` must be given", 34),
+        (s"${head}n_states:2\nvar a={0,1}\n", "`neighborhood:` must be given", 26),
+        (s"${head}n_states:300\n", "2 to 256 states", 24),
+        (s"${head}n_states:x\n", "expected a number", 24),
+        (s"${head}n_states:7\nneighborhood:Moore\n0,0,0,0,0,0,0,0,0,1\n", "too large", 24),
+        (s"${head}n_states:2\nneighborhood:hexagonal\n", "hexagonal neighbourhood is Golly's", 39),
+        (s"${head}n_states:2\nneighborhood:Hilbert\n", "unknown neighbourhood `Hilbert`", 39),
+        (s"${head}n_states:2\nsymmetries:mirror\n", "unknown symmetries `mirror`", 37),
+        (s"${head}symmetries:rotate8\nn_states:2\nneighborhood:vonNeumann\n0,0,0,0,0,1\n", "turns a Moore neighbourhood", 26),
+        (s"${head}colour:red\n", "unknown setting `colour:`", 15),
+        (s"${moore}0,0,0,0,0,0,0,0,0,1\nn_states:2\n", "must come before", 65),
+        (s"${moore}0,0,0,0,2,0,0,0,0,1\n", "there is no state 2", 53),
+        (s"${moore}0,0,0,0,0,0,0,0,0,2\n", "there is no state 2", 63),
+        (s"${moore}0000200001\n", "there is no state 2", 49),
+        (s"${moore}0,0,0,0,0,0,0,0,1\n", "has 10 entries", 62),
+        (s"${moore}0,0,0,0,0,0,0,0,0,0,1\n", "this one has more", 65),
+        (s"${moore}000000000\n", "has 10 entries", 54),
+        (s"${moore}00000000011\n", "this one has more", 55),
+        (s"${moore}0,0,0,0,0,0,0,0,0,\n", "this one has 9", 63),
+        (s"${moore}0,0;0,0,0,0,0,0,0,1\n", "expected `,`", 48),
+        (s"${moore}0,0,0,0,b,0,0,0,0,1\n", "the variable `b` is not defined", 53),
+        (s"${moore}var any={0,1}\n0,0,0,0,anz,0,0,0,0,1\n", "did you mean `any`?", 67),
+        (s"${moore}000a000001\n", "all digits", 48),
+        (s"${moore}var a={0,1}\n0,0,0,0,0,0,0,0,0,a\n", "no input binds", 75),
+        (s"${moore}var a={0,2}\n", "there is no state 2", 54),
+        (s"${moore}var a={0,c}\n", "the variable `c` is not defined", 54),
+        (s"${moore}var a={0,1}\nvar a={0}\n", "already defined", 61),
+        (s"${moore}var a={0,1\n", "expected `,` or `}`", 55),
+        (s"${moore}var a={0,1} x\n", "unexpected text", 57),
+        (s"${von}x\n", "expected a transition", 50),
+        (s"${head}n_states:12\nneighborhood:vonNeumann\n012001\n", "separated by commas", 51),
+        (s"${moore}@COLORS\n1 300 0 0\n", "0 to 255", 55),
+        (s"${moore}@COLORS\n1 2\n", "a colour is", 53),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rule_file(text).unwrap_err()
+
+        assert(d.message.contains(says), s"case ${i}: ${d.message}")
+        assert_eq(d.span.start, usize(at), s"case ${i}: ${d.message}")
+end tbl_errors
+
+// -- multi-state RLE, and the command line -----------------------------------------------------------
+
+@test("multi-state RLE reads `.`, `A`…`X` and the prefixed letters as Golly writes them")
+tbl_rle_states()
+    val p = parse_rle("x = 6, y = 1, rule = WireWorld\n.AXpAqByO!").unwrap()
+
+    assert_eq(p.rule_name, "WireWorld")
+    assert(p.rule.is_none())
+    assert_eq(p.most_state(), 255)
+
+    var g = grid(6, 1, Bounded)
+
+    p.stamp(&g, 0, 0)
+
+    val states = [0, 1, 24, 25, 50, 255]
+
+    for x in 0..<6
+        assert_eq(int(g.state(x, 0)), states[usize(x)])
+
+    assert_eq(g.population(), 5)
+
+@test("`b` and `o` are states 0 and 1 among the letters, and a rule name is kept for the rule file")
+tbl_rle_mixed()
+    val p = parse_rle("x = 4, y = 1, rule = My-Rule_2\nboB.!").unwrap()
+
+    assert_eq(p.rule_name, "My-Rule_2")
+    assert_eq(picture(stamped("x = 4, y = 1\nboB.!", Bounded)), ".12.")
+
+@test("a pattern naming its rule by name needs --rule-file, and the file must have the pattern's states")
+tbl_cli_rule_file()
+    val wire = parse_rle("x = 2, y = 1, rule = WireWorld\nBA!").unwrap()
+    val e = chosen_rule("", wire).unwrap_err()
+
+    assert(e.contains("give the file with --rule-file"))
+    assert(rule_file("rules/WireWorld.rule", "", wire).unwrap().same(wireworld()))
+    assert(rule_file("rules/WireWorld.rule", "B3/S23", wire).unwrap_err().contains("give one"))
+    assert(rule_file("rules/Life.rule", "", wire).unwrap_err().contains("states are 0 to 1"))
+    assert(rule_file("rules/None.rule", "", wire).unwrap_err().contains("rules/None.rule"))
+
+@test("a table rule shows its name in the viewer, and keeps it when a pattern without a rule loads")
+tbl_model()
+    val m = model(grid(16, 16, Torus), wireworld())
+
+    assert_eq(m.rule_text.read(), "WireWorld")
+    assert(status(m).contains("WireWorld"))
+
+    m.load(parse_rle(GLIDER).unwrap())
+    assert(m.rule.same(bs_life()))
+
+    val n = model(grid(16, 16, Torus), wireworld())
+
+    n.load(parse_rle("x = 2, y = 1\nBA!").unwrap())
+    assert(n.rule.same(wireworld()))
+    assert_eq(int(n.grid.state(7, 7)), 2)
