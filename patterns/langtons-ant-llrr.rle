@@ -1,0 +1,5 @@
+#N Langton's ant LLRR
+#C One four-colour ant facing north on an empty plane, growing a symmetric cardioid.
+#C Run with --rule-file rules/LangtonsAnt_LLRR.rule.
+x = 1, y = 1, rule = LangtonsAnt_LLRR
+D!
