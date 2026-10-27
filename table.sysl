@@ -22,8 +22,12 @@
 // That bounds the table at 2^24 entries — n_states to the power of the neighbourhood's size plus one
 // — which is six states for Moore and twenty-seven for von Neumann.
 //
-// Other sections — @TREE, @ICONS, @NAMES and whatever Golly adds next — are skipped, as Golly skips
-// a section it does not know.
+// A rule may be a @TREE instead (`tree.sysl`), and a file with both is the one that comes first, as
+// Golly reads it. A tree small enough is expanded into the same flat array; a larger one is walked
+// for every cell.
+//
+// Other sections — @ICONS, @NAMES and whatever Golly adds next — are skipped, as Golly skips a
+// section it does not know.
 
 import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, read_digits, scanner_of, where, nearest_name,
                         is_ident_start, is_ident_cont}
@@ -51,6 +55,13 @@ enum Neighbourhood
 
     size(self) -> int = if self == Moore then 8 else 4
 
+    // The neighbours in the order a rule tree looks them up — NW, NE, SW, SE, N, W, E, S, or N, W,
+    // E, S — each as its place in `ring`.
+    tree_order(self) -> []int
+        self match
+            Moore -> [7, 1, 5, 3, 0, 6, 2, 4]
+            VonNeumann -> [0, 3, 1, 2]
+
     // The spelling a transition's entries are listed in, for a diagnostic.
     order(self) -> string = if self == Moore then "C,N,NE,E,SE,S,SW,W,NW,C'" else "C,N,E,S,W,C'"
 
@@ -59,13 +70,21 @@ struct RuleTable
     states: int
     neighbourhood: Neighbourhood
     // What a cell becomes, at index `c + n·s₁ + n²·s₂ + …` for its own state `c` and its
-    // neighbours' states `s₁, s₂, …` in ring order, `n` being the number of states.
+    // neighbours' states `s₁, s₂, …` in ring order, `n` being the number of states. Empty for a tree
+    // too large to expand, which is walked instead.
     next: Buf[u8]
     // Each state's colour, as 0xRRGGBB.
     colours: Buf[u32]
+    // A rule tree's nodes, `states` entries apiece: at depth 1 what the cell becomes, above it where
+    // the child node's entries begin. Empty for a table.
+    tree: Buf[int]
+    // Where the root's entries begin.
+    root: int
 
     // What a cell in state `cells[0]` becomes when its neighbours are `cells[1..]`, in ring order.
     lookup(self, cells: []int) -> u8
+        if self.next.len() == 0 then return self.walk(cells)
+
         var index = 0
         var weight = 1
 
@@ -74,6 +93,17 @@ struct RuleTable
             weight *= self.states
 
         self.next[usize(index)]
+
+    // `lookup`, by walking the tree from its root: one step per neighbour in tree order, and the
+    // cell's own state last.
+    walk(self, cells: []int) -> u8
+        val order = self.neighbourhood.tree_order()
+        var at = self.root
+
+        for i in 0..<order.len
+            at = self.tree[usize(at + cells[usize(order[i] + 1)])]
+
+        u8(self.tree[usize(at + cells[0])])
 
 // An entry of a transition.
 private enum Term
@@ -86,6 +116,7 @@ private enum Term
 private enum Section
     Doc
     Transitions
+    Nodes
     Colours
     Skipped
 
@@ -123,6 +154,7 @@ parse_rule_file(text: string) -> Result[RuleTable, Diagnostic]
     var section = Doc
     var table_at: Option[Span] = None
     var tree_at: Option[Span] = None
+    var tree = tree_reader()
 
     while !s.at_end()
         val start = s.offset
@@ -168,12 +200,15 @@ parse_rule_file(text: string) -> Result[RuleTable, Diagnostic]
                 if table_at.is_some() then return Err(error(at, "a second @TABLE"))
 
                 table_at = Some(at)
-                section = Transitions
+                section = if tree_at.is_some() then Skipped else Transitions
+            elif word == "TREE"
+                if tree_at.is_some() then return Err(error(at, "a second @TREE"))
+
+                tree_at = Some(at)
+                section = if table_at.is_some() then Skipped else Nodes
             elif word == "COLORS"
                 section = Colours
             else
-                if word == "TREE" then tree_at = Some(at)
-
                 section = Skipped
 
             continue
@@ -182,22 +217,35 @@ parse_rule_file(text: string) -> Result[RuleTable, Diagnostic]
 
         section match
             Transitions -> table_line(&r, &line)?
+            Nodes -> tree_line(&tree, text, &line)?
             Colours -> colour_line(&r, &line)?
             _ -> ()
 
     if r.name == "" then return Err(error(s.here(), "a rule file begins with `@RULE <name>`"))
 
-    val at = table_at match
-        Some(t) -> t
-        None ->
-            tree_at match
-                Some(t) -> return Err(error(t, "this rule is a @TREE, and this reader runs @TABLE rules"))
-                None -> return Err(error(s.here(), "the file has no @TABLE section"))
+    // Of a @TABLE and a @TREE, the rule is the one that comes first.
+    val at = (table_at, tree_at) match
+        (Some(a), Some(b)) -> if b.start < a.start then return tree_rule(r, tree, b) else a
+        (Some(a), None) -> a
+        (None, Some(b)) -> return tree_rule(r, tree, b)
+        (None, None) -> return Err(error(s.here(), "the file has no @TABLE or @TREE section"))
 
     if !r.body then settle(&r, at)?
 
-    Ok(RuleTable(r.name, r.states, r.hood.unwrap(), expand(r), colours_of(r)))
+    Ok(RuleTable(r.name, r.states, r.hood.unwrap(), expand(r), colours_of(r), buf(), 0))
 end parse_rule_file
+
+// The rule a @TREE gives, at `at`: its nodes, and the table they expand to where it fits.
+private tree_rule(r: Reader, t: TreeReader, at: Span) -> Result[RuleTable, Diagnostic]
+    val root = finish_tree(t, at)?
+    var named = r
+
+    named.states = t.states
+
+    var rule = RuleTable(r.name, t.states, if t.neighbours == 8 then Moore else VonNeumann, buf(), colours_of(named), t.children, root)
+
+    rule.next = expand_tree(rule)
+    Ok(rule)
 
 // One line of @TABLE: a setting, a variable, or a transition.
 private table_line(r: *Reader, s: *Scanner) -> Result[unit, Diagnostic]
@@ -452,7 +500,7 @@ private colour_line(r: *Reader, s: *Scanner) -> Result[unit, Diagnostic]
 private rgb(r: int, g: int, b: int) -> u32 = u32(r) << 16 | u32(g) << 8 | u32(b)
 
 // A decimal number, held to something a table could mean.
-private read_number(s: *Scanner) -> Result[int, Diagnostic]
+read_number(s: *Scanner) -> Result[int, Diagnostic]
     val m = s.mark()
 
     read_digits(s, 10) match
@@ -462,7 +510,7 @@ private read_number(s: *Scanner) -> Result[int, Diagnostic]
             Ok(int(n))
         Err(e) -> Err(error(where(e), "expected a number"))
 
-private end_of_line(s: *Scanner) -> Result[unit, Diagnostic]
+end_of_line(s: *Scanner) -> Result[unit, Diagnostic]
     s.skip_blanks()
 
     if !s.at_end() then return Err(error(Span(s.offset, s.offset + 1), "unexpected text at the end of the line"))
@@ -650,6 +698,34 @@ private arrangements(symmetry: string, m: int) -> Buf[int]
                 group.push((by - i + m) % m)
 
     group
+
+// A tree's every neighbourhood walked once, in the order `RuleTable.lookup` indexes them — or no
+// table at all, when there are more than MOST_ENTRIES of them and the tree is walked for every cell.
+private expand_tree(t: RuleTable) -> Buf[u8]
+    val width = t.neighbourhood.size() + 1
+    var entries = 1
+
+    for i in 0..<width
+        entries *= t.states
+
+        if entries > MOST_ENTRIES then return buf()
+
+    val next: Buf[u8] = buf_filled(usize(entries), 0)
+    val cells: Buf[int] = buf_filled(usize(width), 0)
+
+    for k in 0..<entries
+        next[usize(k)] = t.walk(cells.view())
+
+        // The next combination, the cell's own state turning fastest.
+        var i = 0
+
+        while i < width && cells[usize(i)] == t.states - 1
+            cells[usize(i)] = 0
+            i += 1
+
+        if i < width then cells[usize(i)] += 1
+
+    next
 
 // Golly's default colours, then the file's own, in the order it gives them.
 private colours_of(r: Reader) -> Buf[u32]

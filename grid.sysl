@@ -130,11 +130,25 @@ struct Grid
         self.keep_states()
 
         val ring = t.neighbourhood.ring()
+        val order = t.neighbourhood.tree_order()
         val n = t.states
 
         for y in 0..<self.height
             for x in 0..<self.width
                 val at = self.byte_at(x, y)
+
+                if t.next.len() == 0
+                    // A tree too large to expand: walk it, a neighbour at a time in its own order.
+                    var node = t.root
+
+                    for i in 0..<order.len
+                        val (dx, dy) = ring[usize(order[i])]
+
+                        node = t.tree[usize(node + int(self.state(x + dx, y + dy)))]
+
+                    self.spare_states[at] = u8(t.tree[usize(node + int(self.states[at]))])
+                    continue
+
                 var index = int(self.states[at])
                 var weight = n
 

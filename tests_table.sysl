@@ -324,9 +324,9 @@ tbl_bare_digits()
 
 @test("comments, blank lines and unknown sections are passed over")
 tbl_skipped()
-    val text = "# a comment before\n@RULE X\nsome documentation\n@TREE\nnum_states=2\n@TABLE\n" +
+    val text = "# a comment before\n@RULE X\nsome documentation\n@TABLE\n" +
                "n_states:2   # two\nneighborhood:vonNeumann\n\n# a comment\n0,1,0,0,0,1  # born\n" +
-               "@ICONS\nXPM nonsense\n@NAMES\n0 dead\n"
+               "@ICONS\nXPM nonsense\n@TREE\nnum_states=2\n@NAMES\n0 dead\n"
     val t = table(text)
 
     assert_eq(t.name, "X")
@@ -359,7 +359,7 @@ tbl_errors()
         ("Life\n", "begins with `@RULE", 0),
         ("@RULE\n", "names the rule", 5),
         ("@RULE X\nn_states:2\n", "no @TABLE", 19),
-        ("@RULE X\n@TREE\nnum_states=2\n", "is a @TREE", 8),
+        ("@RULE X\n@TREE\nnum_states=2\n@TABLE\nn_states:2\nneighborhood:Moore\n", "no `num_neighbors=`", 8),
         (s"${head}neighborhood:Moore\n0,0,0,0,0,0,0,0,0,1\n", "`n_states:` must be given", 34),
         (s"${head}n_states:2\nvar a={0,1}\n", "`neighborhood:` must be given", 26),
         (s"${head}n_states:300\n", "2 to 256 states", 24),

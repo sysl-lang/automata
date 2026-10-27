@@ -15,8 +15,8 @@ enum Rule
     // bit `n` of `survive` says a live cell with `n` stays alive. Conway's Life is B3/S23: births
     // `{3}`, survivals `{2, 3}`.
     LifeLike(birth: u16, survive: u16)
-    // A rule table read from a Golly `.rule` file: any number of states up to what its expanded
-    // table holds, on a Moore or von Neumann neighbourhood.
+    // A rule read from a Golly `.rule` file, as a table or a tree: up to 256 states, on a Moore or
+    // von Neumann neighbourhood.
     Table(table: RuleTable)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
@@ -29,7 +29,7 @@ enum Rule
     same(self, other: Rule) -> bool
         (self, other) match
             (LifeLike(b1, s1), LifeLike(b2, s2)) -> b1 == b2 && s1 == s2
-            (Table(t1), Table(t2)) -> t1.name == t2.name && t1.states == t2.states && t1.next == t2.next
+            (Table(t1), Table(t2)) -> t1.name == t2.name && t1.states == t2.states && t1.next == t2.next && t1.tree == t2.tree
             _ -> false
 end Rule
 
