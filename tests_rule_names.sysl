@@ -1,0 +1,215 @@
+@tests
+
+// Rules by name: a rule string that is not a notation is the name of a `<name>.rule` file, looked for
+// in a list of directories, from `--rule` and from an RLE header alike.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{make_dir_all, make_temp_dir, remove_dir_all, write_text}
+import sysl.path.join
+import sysl.text.{from_utf8, replace_all}
+
+private val IMMIGRATION = from_utf8(embed("rules/Immigration.rule")).unwrap()
+private val QUADLIFE = from_utf8(embed("rules/QuadLife.rule")).unwrap()
+private val LIFE = from_utf8(embed("rules/Life.rule")).unwrap()
+
+private val BUNDLED = [
+    ("patterns/diodes.rle", "WireWorld"),
+    ("patterns/immigration-soup.rle", "Immigration"),
+    ("patterns/quadlife-soup.rle", "QuadLife"),
+    ("patterns/langtons-ant.rle", "Langtons-Ant"),
+    ("patterns/langtons-ant-llrr.rle", "LangtonsAnt_LLRR"),
+    ("patterns/turmite.rle", "Turmite_180121020081"),
+]
+
+private val BUNDLED_TEXT = [
+    from_utf8(embed("patterns/diodes.rle")).unwrap(),
+    from_utf8(embed("patterns/immigration-soup.rle")).unwrap(),
+    from_utf8(embed("patterns/quadlife-soup.rle")).unwrap(),
+    from_utf8(embed("patterns/langtons-ant.rle")).unwrap(),
+    from_utf8(embed("patterns/langtons-ant-llrr.rle")).unwrap(),
+    from_utf8(embed("patterns/turmite.rle")).unwrap(),
+]
+
+private plain() -> Pattern = parse_rle("x = 1, y = 1\no!").unwrap()
+
+private dirs_of(names: []const string) -> Buf[string]
+    val dirs: Buf[string] = buf()
+
+    for n in names
+        dirs.push(n)
+
+    dirs
+
+// A scratch directory holding `files` in subdirectories, as (subdirectory, file name, text).
+private scratch(files: []const (string, string, string)) -> string
+    val root = make_temp_dir("automata-names-").unwrap()
+
+    for (dir, name, text) in files
+        make_dir_all(join(root, dir)).unwrap()
+        write_text(join(join(root, dir), name), text).unwrap()
+
+    root
+
+private states_of(rule: Result[Rule, string]) -> int = rule.unwrap().states()
+
+@test("--rule takes a name: the file's table, found in the directories given")
+names_from_the_flag()
+    val root = scratch([("a", "QuadLife.rule", QUADLIFE)])
+    val dirs = dirs_of([join(root, "a")])
+    val r = chosen_rule("QuadLife", plain(), dirs).unwrap()
+
+    assert_eq(r.notation(), "QuadLife")
+    assert_eq(r.states(), 5)
+    assert(r is Table(_))
+
+    remove_dir_all(root).unwrap()
+
+@test("an RLE header's name is looked up the same way, with the cells' states checked against the file")
+names_from_a_header()
+    val root = scratch([("a", "Immigration.rule", IMMIGRATION)])
+    val dirs = dirs_of([join(root, "a")])
+    val p = parse_rle("x = 2, y = 1, rule = Immigration\nAB!").unwrap()
+
+    assert_eq(p.rule_name, "Immigration")
+    assert_eq(chosen_rule("", p, dirs).unwrap().notation(), "Immigration")
+
+    val deep = parse_rle("x = 2, y = 1, rule = Immigration\nAD!").unwrap()
+
+    assert(chosen_rule("", deep, dirs).unwrap_err().contains("state 4, and Immigration's states are 0 to 2"))
+
+    remove_dir_all(root).unwrap()
+
+@test("--rule beats the header's name, and a header notation never looks for a file")
+names_flag_beats_header()
+    val root = scratch([("a", "Immigration.rule", IMMIGRATION)])
+    val dirs = dirs_of([join(root, "a")])
+    val p = parse_rle("x = 1, y = 1, rule = Immigration\nA!").unwrap()
+
+    assert(chosen_rule("B36/S23", p, dirs).unwrap().same(parse_rule("B36/S23").unwrap()))
+
+    val notation = parse_rle("x = 1, y = 1, rule = B36/S23\no!").unwrap()
+
+    assert(chosen_rule("", notation, dirs_of([])).unwrap().same(parse_rule("B36/S23").unwrap()))
+
+    remove_dir_all(root).unwrap()
+
+@test("the first directory with the file wins, in the order given")
+names_directory_order()
+    val five = replace_all(QUADLIFE, "QuadLife", "Foo")
+    val three = replace_all(IMMIGRATION, "Immigration", "Foo")
+    val root = scratch([("a", "Foo.rule", five), ("b", "Foo.rule", three), ("c", "Other.rule", three)])
+    val a = join(root, "a")
+    val b = join(root, "b")
+    val c = join(root, "c")
+
+    assert_eq(states_of(chosen_rule("Foo", plain(), dirs_of([a, b]))), 5)
+    assert_eq(states_of(chosen_rule("Foo", plain(), dirs_of([b, a]))), 3)
+    assert_eq(states_of(chosen_rule("Foo", plain(), dirs_of([c, b, a]))), 3)
+    assert_eq(states_of(chosen_rule("Foo", plain(), dirs_of([c, a]))), 5)
+
+    remove_dir_all(root).unwrap()
+
+@test("the directories are --rules-dir, then rules in the current directory, then rules beside the program")
+names_directory_list()
+    assert_eq(rule_dirs("mine", "/opt/automata/automata").join(","), "mine,rules,/opt/automata/rules")
+    assert_eq(rule_dirs("", "/opt/automata/automata").join(","), "rules,/opt/automata/rules")
+    assert_eq(rule_dirs("", "./automata").join(","), "rules")
+    assert_eq(rule_dirs("", "automata").join(","), "rules")
+    assert_eq(options(["automata", "--rules-dir", "d"]).unwrap().rules_dir, "d")
+    assert_eq(options(["automata"]).unwrap().rules_dir, "")
+    assert(options(["automata", "--rules-dir"]).is_err())
+
+@test("an unknown name names what was tried, under the --rule text with a caret")
+names_unknown()
+    val dirs = dirs_of(["rules", "/elsewhere/rules"])
+    val e = chosen_rule("Nope", plain(), dirs).unwrap_err()
+
+    assert(e.contains("--rule could not be read"))
+    assert(e.contains("not a known notation, and no Nope.rule in rules, /elsewhere/rules"))
+    assert(e.contains("1 | Nope"))
+    assert(e.contains("^^^^"))
+
+    val p = parse_rle("x = 1, y = 1, rule = Nope\no!").unwrap()
+    val h = chosen_rule("", p, dirs).unwrap_err()
+
+    assert(h.contains("the pattern's rule is `Nope`"))
+    assert(h.contains("no Nope.rule in rules, /elsewhere/rules"))
+
+    assert(chosen_rule("Nope", plain(), dirs_of([])).unwrap_err().contains("no Nope.rule in any directory"))
+
+@test("a notation beats a file of the same name, and what is not a name keeps the notation's own refusal")
+names_notation_wins()
+    val root = scratch([("a", "W110.rule", replace_all(LIFE, "Life", "W110")), ("a", "B3.rule", replace_all(LIFE, "Life", "B3"))])
+    val dirs = dirs_of([join(root, "a")])
+
+    assert(chosen_rule("W110", plain(), dirs).unwrap().same(parse_rule("W110").unwrap()))
+    assert(!(chosen_rule("W110", plain(), dirs).unwrap() is Table(_)))
+    assert(parse_rle("x = 1, y = 1, rule = W110\no!").unwrap().rule.is_some())
+
+    val e = chosen_rule("B3", plain(), dirs).unwrap_err()
+
+    assert(e.contains("--rule could not be read"))
+    assert(!e.contains("B3.rule"))
+
+    val colon = chosen_rule("Life:T10", plain(), dirs).unwrap_err()
+
+    assert(colon.contains("expected a rule such as B3/S23"))
+    assert(!names_a_rule("Life:T10"))
+    assert(!names_a_rule("B3/S23"))
+    assert(names_a_rule("Langtons-Ant"))
+
+    remove_dir_all(root).unwrap()
+
+@test("a file whose @RULE is not its file name is refused, naming both")
+names_at_rule_must_match()
+    val root = scratch([("a", "Foo.rule", replace_all(LIFE, "Life", "Bar"))])
+    val dirs = dirs_of([join(root, "a")])
+    val e = chosen_rule("Foo", plain(), dirs).unwrap_err()
+
+    assert(e.contains("Foo.rule says @RULE Bar, which is not Foo"))
+
+    val p = parse_rle("x = 1, y = 1, rule = Foo\no!").unwrap()
+
+    assert(chosen_rule("", p, dirs).unwrap_err().contains("@RULE Bar"))
+
+    remove_dir_all(root).unwrap()
+
+@test("names are case-sensitive: quadlife is not QuadLife, whatever the file system does")
+names_case()
+    val root = scratch([("a", "QuadLife.rule", QUADLIFE)])
+    val dirs = dirs_of([join(root, "a")])
+
+    assert(chosen_rule("QuadLife", plain(), dirs).is_ok())
+    assert(chosen_rule("quadlife", plain(), dirs).is_err())
+    assert(chosen_rule("QUADLIFE", plain(), dirs).is_err())
+    assert(find_rule("quadlife", dirs).map(f -> f.is_some()) != Ok(true))
+
+    remove_dir_all(root).unwrap()
+
+@test("a file that cannot be read as a rule stops the search with its own diagnostic")
+names_broken_file()
+    val root = scratch([("a", "Foo.rule", "@RULE Foo\n@TABLE\nn_states:\n"), ("b", "Foo.rule", replace_all(LIFE, "Life", "Foo"))])
+    val e = chosen_rule("Foo", plain(), dirs_of([join(root, "a"), join(root, "b")])).unwrap_err()
+
+    assert(e.contains("Foo.rule is not a rule file this can read"))
+
+    remove_dir_all(root).unwrap()
+
+@test("every bundled pattern names its rule in its header, finds it in rules, and says nothing of --rule-file")
+names_bundled_patterns()
+    val dirs = dirs_of(["rules"])
+
+    for i in 0..<BUNDLED.len
+        val (file, name) = BUNDLED[i]
+        val p = parse_rle(BUNDLED_TEXT[i]).unwrap()
+
+        assert_eq(p.rule_name, name)
+        assert_eq(chosen_rule("", p, dirs).unwrap().notation(), name)
+        assert(!BUNDLED_TEXT[i].contains("--rule-file"), file)
+
+@test("--rule-file still gives the file by path, with a name or a notation beside it refused")
+names_rule_file_unchanged()
+    val p = parse_rle("x = 1, y = 1, rule = QuadLife\nA!").unwrap()
+
+    assert_eq(rule_file("rules/QuadLife.rule", "", p).unwrap().notation(), "QuadLife")
+    assert(rule_file("rules/QuadLife.rule", "QuadLife", p).unwrap_err().contains("give one"))

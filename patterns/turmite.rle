@@ -1,5 +1,5 @@
 #N Turmite 180121020081
 #C One two-state turmite facing north, in state 0, on an empty plane.
-#C Run with --rule-file rules/Turmite_180121020081.rule.
+#C Its rule is Turmite_180121020081.
 x = 1, y = 1, rule = Turmite_180121020081
 B!

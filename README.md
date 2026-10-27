@@ -265,6 +265,30 @@ sysl run . -- --rule-file rules/WireWorld.rule --pattern patterns/diodes.rle --s
 sysl run . -- --rule-file rules/Life.rule --pattern 4
 ```
 
+### Rule names
+
+```
+sysl run . -- --rule QuadLife --pattern patterns/quadlife-soup.rle
+sysl run . -- --pattern patterns/diodes.rle
+sysl run . -- --rules-dir ~/my-rules --rule MyRule --pattern 4
+```
+
+As in Golly's [RuleLoader](https://golly.sourceforge.io/Help/Algorithms/RuleLoader.html), a rule
+string that is not a notation is a rule name, and the rule is the table in `<name>.rule`. This holds
+for `--rule` and for an RLE header's `rule =`, so each bundled pattern loads with `--pattern` alone.
+
+- **A notation wins.** `B3/S23`, `W110` and every other notation read are never looked up as files.
+- **Directories**, first match wins: `--rules-dir <dir>` if given, then `rules/` in the current
+  directory, then `rules/` beside the executable. (Golly searches its temporary folder, then your rules
+  folder, then the supplied Rules folder; the flag and the current directory are the user's, the one
+  beside the executable is the supplied one.)
+- **Names are case-sensitive**, and `<name>.rule` is spelled exactly. The file's `@RULE` line must
+  spell the name exactly too, as Golly requires, or the file is refused with both names.
+- **Names are letters, digits, `-` and `_`.** Golly's file format forbids spaces and
+  colons in them, so `QuadLife:T10` is not a name and is refused as before; a `:` suffix is not read.
+- **A name nobody has** is refused with the diagnostic drawn under it: `not a known notation, and
+  no Nope.rule in rules, /usr/local/bin/rules`.
+
 `--rule-file` loads a rule in Golly's [`.rule` format](https://golly.sourceforge.io/Help/formats.html#rule).
 Of its sections, four are read:
 
@@ -339,8 +363,8 @@ sysl run . -- --rule-file rules/QuadLife.rule --pattern patterns/quadlife-soup.r
 
 RLE as Golly and LifeWiki write it: `#` lines (`#N` names the pattern), the `x = , y = , rule =`
 header, runs of `b` and `o`, `$` and `!`. Multi-state patterns use Golly's letters: `.` for state 0,
-`A`–`X` for 1–24, and `pA`…`yO` above them. A header whose rule is a name (`rule = WireWorld`) needs
-the rule's file given with `--rule-file`; one that names a `W` rule is that rule. The reader is built
+`A`–`X` for 1–24, and `pA`…`yO` above them. A header whose rule is a name (`rule = WireWorld`) loads
+`WireWorld.rule`, as under [Rule names](#rule-names); one that names a `W` rule is that rule. The reader is built
 on [`parsing`](https://github.com/sysl-lang/parsing). Eight patterns are bundled: glider, R-pentomino,
 acorn, Gosper glider gun and pulsar; two Brian's Brain spaceships head on (`/2/3`); a Star Wars soup
 (`345/2/4`); and Rule 110 from one cell.

@@ -4,7 +4,7 @@
 // syslUI viewer.
 //
 //     automata [--rule <B…/S… | B…/S…/C… | W… | R…/T…/C…/N… | MS,D… | R…,W… | R…,C…,M…,S…,B…>
-//              | --rule-file <file.rule>]
+//              | --rule <name> | --rule-file <file.rule>] [--rules-dir <dir>]
 //              [--pattern <1-8 | file.rle | file.mcl>]
 //              [--size <w>x<h>] [--torus | --bounded]
 //     automata --shot <png> [--generations <n>] [same options]
@@ -20,7 +20,8 @@
 import sh.sysl.ui.{Rect, render, pluto_canvas, fraction}
 import sh.sysl.ui_sdl.{app, run, system_font}
 import sh.sysl.plutovg
-import sh.sysl.parsing.source_of
+import sh.sysl.parsing.{Span, error, source_of}
+import sysl.buf.{Buf, buf}
 import sysl.fs.read_text
 import sysl.text.parse_int
 
@@ -31,6 +32,7 @@ const HEIGHT: int = 720
 struct Options
     rule: string
     rule_file: string
+    rules_dir: string
     pattern: string
     width: int
     height: int
@@ -52,7 +54,7 @@ main(args: []string) -> Result[unit, string]
 
     if !o.edged && p.wrap == Some(false) then o.edges = Bounded
 
-    val rule = if o.rule_file == "" then chosen_rule(o.rule, p)? else rule_file(o.rule_file, o.rule, p)?
+    val rule = if o.rule_file == "" then chosen_rule(o.rule, p, rule_dirs(o.rules_dir, args[0]))? else rule_file(o.rule_file, o.rule, p)?
     val m = model(grid(o.width, o.height, o.edges), rule)
 
     m.start(p, starts_on_plane(o, p, rule))
@@ -87,17 +89,25 @@ end main
 starts_on_plane(o: Options, p: Pattern, rule: Rule) -> bool = !o.edged && p.wrap.is_none() && plane_runs(rule)
 
 // The rule to start under: the one given with `--rule` if there was one, else the pattern's own, else
-// Life. A `--rule` that does not read is refused with the diagnostic drawn under the text, and so is a
-// pattern whose rule is a name, which only a rule file can supply, and one with cells in states a
-// Generations rule does not have.
-chosen_rule(given: string, p: Pattern) -> Result[Rule, string]
-    if p.rule.is_none() && p.rule_name != "" && given == ""
-        return Err(s"the pattern's rule is `${p.rule_name}`, which is a rule file's name: give the file with --rule-file")
+// Life. A rule that is not a notation is a name, and comes from `<name>.rule` in `dirs`. A `--rule`
+// that is neither is refused with the diagnostic drawn under the text, and so is one with cells in
+// states the rule does not have.
+chosen_rule(given: string, p: Pattern, dirs: Buf[string] = buf()) -> Result[Rule, string]
+    var rule = p.rule.unwrap_or(LifeLike(0b1000, 0b1100))
 
-    val rule = if given != ""
-        parse_rule(given).map_err(d -> s"--rule could not be read\n${d.render(source_of("--rule", given))}")?
-    else
-        p.rule.unwrap_or(LifeLike(0b1000, 0b1100))
+    if given != ""
+        parse_rule(given) match
+            Ok(r) -> rule = r
+            Err(d) ->
+                if !names_a_rule(given) then return Err(s"--rule could not be read\n${d.render(source_of("--rule", given))}")
+
+                find_rule(given, dirs)? match
+                    Some(t) -> return table_rule(t, p)
+                    None -> return Err(s"--rule could not be read\n${error(Span(0, given.len), not_found(given, dirs)).render(source_of("--rule", given))}")
+    elif p.rule.is_none() && p.rule_name != ""
+        find_rule(p.rule_name, dirs)? match
+            Some(t) -> return table_rule(t, p)
+            None -> return Err(s"the pattern's rule is `${p.rule_name}`, which is ${not_found(p.rule_name, dirs)}")
 
     if rule.states() > 2 && int(p.most_state()) >= rule.states()
         return Err(s"the pattern has cells in state ${p.most_state()}, and ${rule.notation()}'s states are 0 to ${rule.states() - 1}")
@@ -111,13 +121,17 @@ rule_file(file: string, given: string, p: Pattern) -> Result[Rule, string]
     val text = read_text(file).map_err(e -> s"${file}: ${e}")?
     val t = parse_rule_file(text).map_err(d -> s"${file} is not a rule file this can read\n${d.render(source_of(file, text))}")?
 
+    table_rule(t, p)
+
+// The rule table `t`, which must have every state the pattern uses.
+private table_rule(t: RuleTable, p: Pattern) -> Result[Rule, string]
     if int(p.most_state()) >= t.states
         return Err(s"the pattern has cells in state ${p.most_state()}, and ${t.name}'s states are 0 to ${t.states - 1}")
 
     Ok(Table(t))
 
 options(args: []string) -> Result[Options, string]
-    var o = Options("", "", "4", 192, 144, Torus, "", 100, false, false)
+    var o = Options("", "", "", "4", 192, 144, Torus, "", 100, false, false)
     var i = 1
 
     while i < args.len
@@ -141,6 +155,8 @@ options(args: []string) -> Result[Options, string]
             o.rule = value
         elif flag == "--rule-file"
             o.rule_file = value
+        elif flag == "--rules-dir"
+            o.rules_dir = value
         elif flag == "--pattern"
             o.pattern = value
         elif flag == "--shot"

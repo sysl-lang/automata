@@ -1,6 +1,6 @@
 #N QuadLife soup
 #C A 24 by 24 soup of all four colours, 45% of cells live and each colour as likely as another.
-#C Run with --rule-file rules/QuadLife.rule.
+#C Its rule is QuadLife.
 x = 24, y = 24, rule = QuadLife
 DC3.C.A.ACBC2.2DC.B.DAD$A.ADB2A2.B2A7.B.A$3.BADCB2.CD2.B4.2C.DC$.ACA2.
 D.C.A.A3.2B3.B.D$2.CD2BD4.A2.D2.C2.B2.B$CA4.ADCDBAB4.2B.2B$.AD.C.B2.D
