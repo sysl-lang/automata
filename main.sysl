@@ -1,0 +1,132 @@
+// Life-like cellular automata: a bit-packed grid, any B/S rule, RLE patterns, and a syslUI viewer.
+//
+//     automata [--rule <B…/S…>] [--pattern <1-5 | file.rle>] [--size <w>x<h>] [--bounded]
+//     automata --shot <png> [--generations <n>] [same options]
+//
+// `--shot` draws one frame with no window at all, after running the pattern for a fixed number of
+// generations, and writes it to a PNG: syslUI rasterizes into a PlutoVG surface either way, and the
+// surface can write itself out, so the frame a person would see is one a machine can check.
+
+import sh.sysl.ui.{Rect, render, pluto_canvas, fraction}
+import sh.sysl.ui_sdl.{app, run, system_font}
+import sh.sysl.plutovg
+import sh.sysl.parsing.source_of
+import sysl.fs.read_text
+import sysl.text.parse_int
+
+const WIDTH: int = 960
+const HEIGHT: int = 720
+
+// What the command line asked for.
+struct Options
+    rule: string
+    pattern: string
+    width: int
+    height: int
+    edges: Edges
+    shot: string
+    generations: int
+
+main(args: []string) -> Result[unit, string]
+    val o = options(args)?
+    val p = pattern_of(o.pattern)?
+
+    val rule = chosen_rule(o.rule, p)?
+    var g = grid(o.width, o.height, o.edges)
+
+    p.stamp_centred(&g)
+
+    val m = model(g, rule)
+
+    m.message.set(p.name)
+
+    if o.shot == ""
+        return run(app("automata", () -> screen(m), () -> GROUND, WIDTH, HEIGHT,
+                       on_event = e -> shortcut(m, e), on_frame = dt -> tick(m, dt)))
+
+    m.advance(o.generations)
+
+    val font = system_font()
+
+    if font == "" then return Err("no font this program knows about is on this machine")
+
+    val surf = plutovg.surface(WIDTH, HEIGHT).expect("a drawing surface")
+    val vg = plutovg.canvas(surf).expect("a drawing canvas")
+    val face = plutovg.font(font).expect(s"the font at ${font} opened")
+    var c = pluto_canvas(vg, face, 15.0)
+
+    surf.clear(fraction(GROUND, 16), fraction(GROUND, 8), fraction(GROUND, 0))
+    render(screen(m), &c, Rect(0, 0, WIDTH, HEIGHT))
+
+    if !surf.write_png(o.shot) then return Err(s"${o.shot} could not be written")
+
+    print(s"wrote ${o.shot}: ${status(m)}")
+    Ok(())
+end main
+
+// The rule to start under: the one given with `--rule` if there was one, else the pattern's own, else
+// Life. A `--rule` that does not read is refused with the diagnostic drawn under the text.
+chosen_rule(given: string, p: Pattern) -> Result[Rule, string]
+    if given != ""
+        return parse_rule(given).map_err(d -> s"--rule could not be read\n${d.render(source_of("--rule", given))}")
+
+    Ok(p.rule.unwrap_or(LifeLike(0b1000, 0b1100)))
+
+private options(args: []string) -> Result[Options, string]
+    var o = Options("", "4", 192, 144, Torus, "", 100)
+    var i = 1
+
+    while i < args.len
+        val flag = args[i]
+
+        if flag == "--bounded"
+            o.edges = Bounded
+            i += 1
+            continue
+
+        if i + 1 >= args.len then return Err(s"${flag} needs a value")
+
+        val value = args[i + 1]
+
+        if flag == "--rule"
+            o.rule = value
+        elif flag == "--pattern"
+            o.pattern = value
+        elif flag == "--shot"
+            o.shot = value
+        elif flag == "--generations"
+            o.generations = parse_int(value).map_err(e -> s"--generations: `${value}` is not a number")?
+        elif flag == "--size"
+            val (w, h) = size_of(value).ok_or(s"--size: expected <width>x<height>, such as 256x192")?
+
+            o.width = w
+            o.height = h
+        else
+            return Err(s"unknown option ${flag}")
+
+        i += 2
+
+    Ok(o)
+end options
+
+private size_of(text: string) -> Option[(int, int)]
+    val at = text.index_of("x")?
+    val w = parse_int(text[0..<at]).ok()?
+    val h = parse_int(text[at + 1..<text.len]).ok()?
+
+    if w < 1 || h < 1 || w > 8192 || h > 8192 then None else Some((w, h))
+
+// A bundled pattern by its number, or an RLE file by its path.
+private pattern_of(which: string) -> Result[Pattern, string]
+    val patterns = bundled()
+
+    parse_int(which) match
+        Ok(n) ->
+            if n < 1 || n > int(patterns.len) then return Err(s"--pattern: there are ${patterns.len} bundled patterns")
+
+            return Ok(parse_rle(patterns[usize(n - 1)]).unwrap())
+        Err(_) -> ()
+
+    val text = read_text(which).map_err(e -> s"${which}: ${e}")?
+
+    parse_rle(text).map_err(d -> s"${which} is not a pattern this can read\n${d.render(source_of(which, text))}")

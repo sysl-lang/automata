@@ -1,0 +1,45 @@
+// The patterns the program carries with it, as the RLE text LifeWiki publishes them.
+//
+// They are kept as text rather than as cell lists so that every one of them goes through the same
+// reader a pattern file does, and the tests read each of them back.
+
+val GLIDER: string = """
+    #N Glider
+    x = 3, y = 3, rule = B3/S23
+    bob$2bo$3o!
+    """
+
+val R_PENTOMINO: string = """
+    #N R-pentomino
+    #C A methuselah: five cells that take 1103 generations to settle.
+    x = 3, y = 3, rule = B3/S23
+    b2o$2ob$bo!
+    """
+
+val ACORN: string = """
+    #N Acorn
+    #C A methuselah found by Charles Corderman.
+    x = 7, y = 3, rule = B3/S23
+    bo5b$3bo3b$2o2b3o!
+    """
+
+val GOSPER_GUN: string = """
+    #N Gosper glider gun
+    #C The first known gun, found by Bill Gosper in 1970; it fires a glider every 30 generations.
+    x = 36, y = 9, rule = B3/S23
+    24bo$22bobo$12b2o6b2o12b2o$11bo3bo4b2o12b2o$2o8bo5bo3b2o$2o8bo3bob2o4b
+    obo$10bo5bo7bo$11bo3bo$12b2o!
+    """
+
+val PULSAR: string = """
+    #N Pulsar
+    x = 13, y = 13, rule = B3/S23
+    2b3o3b3o2b2$o4bobo4bo$o4bobo4bo$o4bobo4bo$2b3o3b3o2b2$2b3o3b3o2b$o4bobo4bo$
+    o4bobo4bo$o4bobo4bo2$2b3o3b3o!
+    """
+
+// Every bundled pattern, in the order the viewer's number keys offer them.
+bundled() -> []string = [GLIDER, R_PENTOMINO, ACORN, GOSPER_GUN, PULSAR]
+
+// The rules the viewer's number keys offer, as the notation a person would type.
+preset_rules() -> []string = ["B3/S23", "B36/S23", "B2/S", "B3678/S34678"]

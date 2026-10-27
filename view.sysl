@@ -1,0 +1,264 @@
+// The viewer: the grid drawn as a pannable, zoomable board, a status line, and a field a rule is typed
+// into.
+//
+// **The board is one view that paints the cells itself.** A view per cell would be a tree of tens of
+// thousands of boxes rebuilt every generation; a single view that knows the grid draws each row's runs
+// of live cells as one rectangle apiece, and asks the canvas for the pointer's drag, wheel and taps
+// while it paints, which is the only moment it knows where it is.
+
+import sh.sysl.ui.{View, Canvas, Size, Rect, Signal, signal, column, row, text, button, text_field,
+                   spacer, NOBODY}
+import sh.sysl.ui_sdl.stop
+import sh.sysl.sdl3.{Event, EventKind, SCANCODE_ESCAPE, SCANCODE_SPACE, SCANCODE_N, SCANCODE_R,
+                     SCANCODE_C, SCANCODE_T, SCANCODE_1, SCANCODE_EQUALS, SCANCODE_MINUS,
+                     SCANCODE_KP_PLUS, SCANCODE_KP_MINUS, SCANCODE_RETURN, SCANCODE_KP_ENTER}
+import sysl.math.{Float, clamp, max, min}
+import sysl.rand.{Rng, rng}
+
+// Generations per second, slowest first; `+` and `-` move along it.
+val SPEEDS = [1, 2, 5, 10, 20, 30, 60, 120, 240, 480]
+
+// At most this many generations are run in one frame, so a slow machine falls behind rather than
+// stalling.
+const MOST_PER_FRAME: int = 32
+
+const GROUND: u32 = 0x12141C
+const BOARD: u32 = 0x0B0C10
+const LIVE: u32 = 0x8BD3A8
+const EDGE: u32 = 0x3A4050
+
+// The id the rule field takes the keyboard under.
+const RULE_FIELD: int = 1
+
+// Everything the viewer knows. The grid and the camera are plain fields, written in place; what the
+// tree is built from is in signals, so writing one rebuilds the status line on the same frame.
+struct Model
+    grid: Grid
+    rule: Rule
+    running: bool
+    speed: int
+    // Points per cell, and where cell (0, 0)'s corner is, relative to the board's own corner.
+    zoom: real
+    ox: real
+    oy: real
+    placed: bool
+    // Fractions of a generation owed, carried from frame to frame.
+    owed: real
+    // Whether a field has the keyboard, so typing a rule does not also drive the shortcuts.
+    typing: bool
+    random: Rng
+    generation: &Signal[int]
+    rule_text: &Signal[string]
+    message: &Signal[string]
+
+    // Something the status line shows has changed.
+    touched(*self) = self.generation.set(self.generation.read())
+
+    advance(*self, n: int)
+        for i in 0..<n
+            self.grid.step(self.rule)
+
+        self.generation.set(self.generation.read() + n)
+
+    // Run `text` as the rule, or say why it cannot be.
+    use_rule(*self, text: string)
+        parse_rule(text) match
+            Ok(r) ->
+                self.rule = r
+                self.rule_text.set(r.notation())
+                self.message.set(s"rule ${r.notation()}")
+            Err(d) -> self.message.set(s"${d.message} (column ${d.span.start + 1} of \"${text}\")")
+
+    // Replace the board with `p`, centred, under its own rule if it names one.
+    load(*self, p: Pattern)
+        self.grid.clear()
+        p.stamp_centred(&self.grid)
+        self.generation.set(0)
+
+        p.rule match
+            Some(r) ->
+                self.rule = r
+                self.rule_text.set(r.notation())
+            None -> ()
+
+        self.message.set(if p.name != "" then p.name else "pattern loaded")
+end Model
+
+model(g: Grid, rule: Rule) -> &Model =
+    Model(g, rule, false, 3, 4.0, 0.0, 0.0, false, 0.0, false, rng(1, 1), signal(0),
+          signal(rule.notation()), signal(""))
+
+// The whole window: the board, then the status line and the rule field under it.
+screen(m: &Model) -> &View =
+    column([
+        board(m).flex(),
+        row([
+            text(status(m)),
+            spacer(),
+            text_field(m.rule_text, RULE_FIELD, 160, "B3/S23"),
+            button("apply", () -> m.use_rule(m.rule_text.read())),
+        ], 10).padding(8),
+        text(if m.message.read() != "" then m.message.read() else HINT).pad(left = 8, bottom = 8),
+    ])
+
+const HINT: string = "space run · n step · +/- speed · r random · c clear · t edges · 1-4 rules · 5-9 patterns"
+
+status(m: &Model) -> string
+    val edges = if m.grid.edges == Torus then "torus" else "bounded"
+    val state = if m.running then s"${SPEEDS[m.speed]}/s" else "paused"
+
+    s"gen ${m.generation.read()}   pop ${m.grid.population()}   ${m.rule.notation()}   ${edges}   ${state}"
+
+private struct Board
+    m: &Model
+
+private board(m: &Model) -> &View = Board(m)
+
+impl View for Board
+    measure(&self, c: *Canvas, avail: Size) -> Size = avail
+
+    paint(&self, c: *Canvas, r: Rect)
+        val m = self.m
+        val g = m.grid
+
+        m.typing = c.focus() != NOBODY
+
+        // The first frame fits the whole grid in the board and centres it.
+        if !m.placed
+            m.zoom = max(1.0, min(real(r.w) / real(g.width), real(r.h) / real(g.height)).floor())
+            m.ox = (real(r.w) - m.zoom * real(g.width)) / 2.0
+            m.oy = (real(r.h) - m.zoom * real(g.height)) / 2.0
+            m.placed = true
+
+        c.fill(r, BOARD)
+        c.clip(r)
+
+        val z = m.zoom
+        val left = real(r.x) + m.ox
+        val top = real(r.y) + m.oy
+
+        c.stroke(Rect(int(left) - 1, int(top) - 1, int(z * real(g.width)) + 2, int(z * real(g.height)) + 2), EDGE)
+
+        // Only the rows and columns that land inside the board are looked at.
+        val y0 = max(0, int(((real(r.y) - top) / z).floor()))
+        val y1 = min(g.height, int(((real(r.bottom()) - top) / z).ceil()))
+        val x0 = max(0, int(((real(r.x) - left) / z).floor()))
+        val x1 = min(g.width, int(((real(r.right()) - left) / z).ceil()))
+        // From six points a cell up, a one-point gap separates rows, so a still life reads as cells.
+        val gap = if z >= 6.0 then 1 else 0
+
+        for y in y0..<y1
+            val py = int(top + real(y) * z)
+            val h = max(1, int(top + real(y + 1) * z) - py - gap)
+            var x = x0
+
+            while x < x1
+                if g.get(x, y)
+                    val start = x
+
+                    while x < x1 && g.get(x, y)
+                        x += 1
+
+                    val px = int(left + real(start) * z)
+
+                    c.fill(Rect(px, py, max(1, int(left + real(x) * z) - px - gap), h), LIVE)
+                else
+                    x += 1
+
+        c.unclip()
+
+        // A tap toggles the cell under it; a drag pans; the wheel zooms about the pointer.
+        if c.tapped(r)
+            val (tx, ty) = c.tap_point()
+
+            m.grid.toggle(int(((real(tx) - left) / z).floor()), int(((real(ty) - top) / z).floor()))
+            m.touched()
+
+        val (dx, dy) = c.drag(r, 0, 3, 3)
+
+        m.ox += real(dx)
+        m.oy += real(dy)
+
+        val (_, wy) = c.wheel(r)
+
+        if wy != 0
+            val (px, py) = c.pointer()
+            val next = clamp(z * (1.0 + real(wy) / 200.0), 0.25, 64.0)
+            val cx = (real(px) - left) / z
+            val cy = (real(py) - top) / z
+
+            m.zoom = next
+            m.ox = real(px) - real(r.x) - cx * next
+            m.oy = real(py) - real(r.y) - cy * next
+    end paint
+
+// What a frame does on its own: run as many generations as the speed owes.
+tick(m: &Model, dt: real)
+    if !m.running then return
+
+    m.owed += dt * real(SPEEDS[m.speed])
+
+    val n = min(MOST_PER_FRAME, int(m.owed))
+
+    if n > 0
+        m.owed -= real(n)
+        m.advance(n)
+
+    if m.owed > real(MOST_PER_FRAME) then m.owed = 0.0
+
+// The keyboard's shortcuts. `true` says the event was dealt with, and the toolkit does not see it.
+//
+// While the rule field has the keyboard every key is the field's except Return, which applies what was
+// typed, and Escape, which still quits.
+shortcut(m: &Model, e: Event) -> bool
+    if e.kind() != EventKind.KeyDown then return false
+
+    val key = e.key_scancode()
+
+    if key == SCANCODE_ESCAPE
+        stop()
+        return true
+
+    if m.typing
+        if key == SCANCODE_RETURN || key == SCANCODE_KP_ENTER
+            m.use_rule(m.rule_text.read())
+            return true
+
+        return false
+
+    if key == SCANCODE_SPACE
+        m.running = !m.running
+        m.owed = 0.0
+        m.touched()
+    elif key == SCANCODE_N
+        m.running = false
+        m.advance(1)
+    elif key == SCANCODE_EQUALS || key == SCANCODE_KP_PLUS
+        m.speed = min(int(SPEEDS.len) - 1, m.speed + 1)
+        m.touched()
+    elif key == SCANCODE_MINUS || key == SCANCODE_KP_MINUS
+        m.speed = max(0, m.speed - 1)
+        m.touched()
+    elif key == SCANCODE_R
+        m.grid.randomize(&m.random, 30)
+        m.generation.set(0)
+    elif key == SCANCODE_C
+        m.grid.clear()
+        m.generation.set(0)
+    elif key == SCANCODE_T
+        m.grid.edges = if m.grid.edges == Torus then Bounded else Torus
+        m.touched()
+    elif key >= SCANCODE_1 && key < SCANCODE_1 + 9
+        val i = usize(key - SCANCODE_1)
+        val rules = preset_rules()
+        val patterns = bundled()
+
+        if i < rules.len
+            m.use_rule(rules[i])
+        elif i - rules.len < patterns.len
+            m.load(parse_rle(patterns[i - rules.len]).unwrap())
+    else
+        return false
+
+    true
+end shortcut

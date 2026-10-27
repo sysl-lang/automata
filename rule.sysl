@@ -1,0 +1,128 @@
+// What a cell becomes, as a value the grid is stepped by.
+//
+// **A rule is data, not a name.** Any rule a person can write down in a notation this reader knows is
+// one the grid can run; the handful the viewer offers on its number keys are just strings parsed by
+// the same function a typed rule, a `--rule` argument or an RLE header goes through. A rule family
+// with a different neighbourhood or more than two states is another variant here, with its own arm in
+// `Grid.step`, and everything that only carries a rule around is unaffected.
+
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, scanner_of}
+
+enum Rule
+    // A Life-like rule: a cell's next state depends on its own state and on how many of its eight
+    // neighbours are alive. Bit `n` of `birth` says a dead cell with `n` live neighbours comes alive;
+    // bit `n` of `survive` says a live cell with `n` stays alive. Conway's Life is B3/S23: births
+    // `{3}`, survivals `{2, 3}`.
+    LifeLike(birth: u16, survive: u16)
+
+    // The rule in B/S notation, counts in ascending order: what `parse_rule` reads back to the same
+    // rule.
+    notation(self) -> string
+        self match
+            LifeLike(b, s) -> s"B${counts(b)}/S${counts(s)}"
+
+    same(self, other: Rule) -> bool
+        (self, other) match
+            (LifeLike(b1, s1), LifeLike(b2, s2)) -> b1 == b2 && s1 == s2
+end Rule
+
+// The counts a mask holds, as the digits B/S notation writes them in.
+private counts(mask: u16) -> string
+    var out = ""
+
+    for n in 0..9
+        if (mask >> n) & 1 == 1 then out = s"${out}${n}"
+
+    out
+
+// Read a rule in B/S notation.
+//
+// Three spellings are accepted, because all three are in circulation in pattern files:
+//
+//   - `B3/S23`, births first, which is what Golly and LifeWiki write;
+//   - `S23/B3`, the same two halves the other way round;
+//   - `23/3`, survivals then births with no letters, the older notation many RLE files still carry.
+//
+// The letters may be either case. Each half is a run of distinct digits from 0 to 8 and may be empty
+// (`B2/S` is Seeds). Anything else is refused with a diagnostic pointing at the byte that broke it.
+parse_rule(text: string) -> Result[Rule, Diagnostic]
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+
+    if s.at_end() then return Err(error(s.here(), "a rule is needed, such as B3/S23"))
+
+    val first = s.peek().unwrap()
+    var birth: u16 = 0
+    var survive: u16 = 0
+
+    if first == u8('B') || first == u8('b')
+        s.bump()
+        birth = read_counts(&s)?
+        expect_half(&s, u8('S'))?
+        survive = read_counts(&s)?
+    elif first == u8('S') || first == u8('s')
+        s.bump()
+        survive = read_counts(&s)?
+        expect_half(&s, u8('B'))?
+        birth = read_counts(&s)?
+    elif first.is_digit() || first == u8('/')
+        survive = read_counts(&s)?
+
+        if !s.accept(u8('/')) then return Err(error(s.here(), "expected `/` between the survival and birth counts"))
+
+        birth = read_counts(&s)?
+    else
+        return Err(error(Span(s.offset, s.offset + 1), "expected a rule such as B3/S23"))
+
+    s.skip_blanks()
+
+    if !s.at_end()
+        return Err(error(Span(s.offset, text.len), "unexpected text after the rule"))
+
+    Ok(LifeLike(birth, survive))
+end parse_rule
+
+// The `/` and the letter that open a rule's second half.
+private expect_half(s: *Scanner, letter: u8) -> Result[unit, Diagnostic]
+    if !s.accept(u8('/')) then return Err(error(s.here(), "expected `/` between the two halves of the rule"))
+
+    val lower = letter + 32
+
+    if !s.accept(letter) && !s.accept(lower)
+        return Err(error(s.here(), s"expected `${str_of(letter)}` after the `/`"))
+
+    Ok(())
+
+// One half of a rule: a run of distinct neighbour counts.
+//
+// **A Hensel letter straight after a count is refused by name**, because that is what isotropic
+// non-totalistic notation looks like (`B2a/S12`, `B2-a/S12`), and a person who wrote one deserves to
+// hear that the notation is the problem rather than that the letter is.
+private read_counts(s: *Scanner) -> Result[u16, Diagnostic]
+    var mask: u16 = 0
+
+    loop
+        s.peek() match
+            Some(c) ->
+                if c.is_digit()
+                    val n = c - u8('0')
+                    val at = Span(s.offset, s.offset + 1)
+
+                    if n > 8 then return Err(error(at, s"a cell has 8 neighbours, so ${n} cannot be a count"))
+
+                    if (mask >> n) & 1 == 1 then return Err(error(at, s"the count ${n} appears twice"))
+
+                    mask |= u16(1) << n
+                    s.bump()
+                elif mask != 0 && "cekainyqjrtwz-".contains(str_of(c))
+                    return Err(error(Span(s.offset, s.offset + 1),
+                        "letters after a count are isotropic non-totalistic notation, which this reader does not take"))
+                else
+                    break
+            None -> break
+
+    Ok(mask)
+end read_counts
+
+private str_of(c: u8) -> string = s"${char(c)}"

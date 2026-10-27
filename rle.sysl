@@ -1,0 +1,181 @@
+// Run-length encoded patterns, the format Golly and LifeWiki publish patterns in.
+//
+//     #N Glider
+//     #C A comment line.
+//     x = 3, y = 3, rule = B3/S23
+//     bob$2bo$3o!
+//
+// Lines starting with `#` come first; `#N` names the pattern and the rest are skipped. The header
+// gives the bounding box and, optionally, the rule. The body is runs of `b` (dead) and `o` (alive),
+// each with an optional count in front, `$` ending a row (a count in front of it ends that many), and
+// `!` ending the pattern. Whitespace and line breaks between items are ignored, and so is everything
+// after the `!`.
+//
+// This reader takes two-state patterns: a letter other than `b` and `o` (a multi-state cell) is
+// refused rather than guessed at.
+
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, read_digits, scanner_of, where}
+import sysl.buf.{Buf, buf}
+
+struct Cell
+    x: int
+    y: int
+
+struct Pattern
+    name: string
+    width: int
+    height: int
+    // The rule the header names, if it names one.
+    rule: Option[Rule]
+    // The live cells, relative to the pattern's top-left corner.
+    live: Buf[Cell]
+
+    // Draw the pattern into `g` with its top-left corner at `x`, `y`. Cells off a bounded grid are
+    // dropped; on a torus they wrap.
+    stamp(self, g: *Grid, x: int, y: int)
+        for i in 0..<self.live.len()
+            val c = self.live[i]
+
+            g.set(x + c.x, y + c.y, true)
+
+    // Draw it centred.
+    stamp_centred(self, g: *Grid) = self.stamp(g, (g.width - self.width) / 2, (g.height - self.height) / 2)
+end Pattern
+
+// Read an RLE pattern. A refusal is a diagnostic whose span points into `text`.
+parse_rle(text: string) -> Result[Pattern, Diagnostic]
+    var s = scanner_of(text)
+    var name = ""
+
+    // The comment lines, and any blank lines among them.
+    loop
+        s.skip_space()
+
+        if !s.accept(u8('#')) then break
+
+        if s.accept(u8('N'))
+            s.skip_blanks()
+
+            val m = s.mark()
+
+            s.skip_to_line_end()
+            name = text[m..<s.offset].trim()
+        else
+            s.skip_to_line_end()
+
+    if s.at_end() then return Err(error(s.here(), "the pattern has no `x = …, y = …` header"))
+
+    val width = header_number(&s, u8('x'))?
+
+    s.skip_blanks()
+
+    if !s.accept(u8(',')) then return Err(error(s.here(), "expected `,` after the width"))
+
+    val height = header_number(&s, u8('y'))?
+    var rule: Option[Rule] = None
+
+    s.skip_blanks()
+
+    if s.accept(u8(','))
+        s.skip_blanks()
+
+        if !s.accept_seq("rule".bytes) then return Err(error(s.here(), "expected `rule = …` after the height"))
+
+        s.skip_blanks()
+
+        if !s.accept(u8('=')) then return Err(error(s.here(), "expected `=` after `rule`"))
+
+        val m = s.mark()
+
+        s.skip_to_line_end()
+
+        parse_rule(text[m..<s.offset]) match
+            Ok(r) -> rule = Some(r)
+            Err(d) -> return Err(shifted(d, m))
+
+    s.skip_blanks()
+
+    if !s.at_end() && !s.accept_newline() then return Err(error(s.here(), "unexpected text after the header"))
+
+    val live: Buf[Cell] = buf()
+
+    read_body(&s, width, height, live)?
+
+    Ok(Pattern(name, width, height, rule, live))
+end parse_rle
+
+// `x = 3` or `y = 3`, with blanks anywhere between.
+private header_number(s: *Scanner, key: u8) -> Result[int, Diagnostic]
+    s.skip_blanks()
+
+    if !s.accept(key) then return Err(error(s.here(), s"expected `${char(key)} =` in the header"))
+
+    s.skip_blanks()
+
+    if !s.accept(u8('=')) then return Err(error(s.here(), s"expected `=` after `${char(key)}`"))
+
+    s.skip_blanks()
+
+    read_count(s)
+
+// A run of decimal digits, as an `int`.
+private read_count(s: *Scanner) -> Result[int, Diagnostic]
+    val m = s.mark()
+
+    read_digits(s, 10) match
+        Ok(n) ->
+            if n > 1_000_000 then return Err(error(s.span_from(m), "the number is larger than any pattern this reads"))
+
+            Ok(int(n))
+        Err(e) -> Err(error(where(e), "expected a number"))
+
+// The runs, from just after the header to the `!`.
+private read_body(s: *Scanner, width: int, height: int, live: Buf[Cell]) -> Result[unit, Diagnostic]
+    var x = 0
+    var y = 0
+
+    loop
+        s.skip_space()
+
+        val m = s.mark()
+        var n = 1
+
+        if s.peek().map(c -> c.is_digit()).unwrap_or(false)
+            n = read_count(s)?
+
+            if n == 0 then return Err(error(s.span_from(m), "a run count must be at least 1"))
+
+            s.skip_space()
+
+        val tag = s.peek() match
+            Some(c) -> c
+            None -> return Err(error(s.here(), "the pattern ends without its closing `!`"))
+
+        val at = Span(m, s.offset + 1)
+
+        if tag == u8('b') || tag == u8('o')
+            if x + n > width then return Err(error(at, s"row ${y + 1} is wider than the header's x = ${width}"))
+
+            if tag == u8('o')
+                if y >= height then return Err(error(at, s"more rows than the header's y = ${height}"))
+
+                for i in 0..<n
+                    live.push(Cell(x + i, y))
+
+            x += n
+        elif tag == u8('$')
+            x = 0
+            y += n
+        elif tag == u8('!')
+            s.bump()
+            return Ok(())
+        else
+            return Err(error(Span(s.offset, s.offset + 1),
+                s"`${char(tag)}` is not `b`, `o`, `$$` or `!`; this reader takes two-state patterns"))
+
+        s.bump()
+end read_body
+
+// A diagnostic about a piece of a text, moved to where that piece sits in the whole.
+private shifted(d: Diagnostic, by: usize) -> Diagnostic =
+    Diagnostic(d.severity, Span(d.span.start + by, d.span.end + by), d.message, d.label, d.note)

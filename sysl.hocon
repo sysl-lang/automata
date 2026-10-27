@@ -1,0 +1,31 @@
+// Life-like cellular automata on a bit-packed grid, with a syslUI viewer.
+//
+//     sysl run .
+//     sysl run . -- --rule B36/S23 --pattern 4
+//     sysl run . -- --shot frame.png
+//
+// The grid is stepped 64 cells per machine word by bit-sliced neighbour counting, under any rule
+// written in B/S notation, on a torus or with dead edges. Patterns are read from RLE.
+
+package {
+  name    = "automata"
+  version = "0.1.0"
+  sysl    = "0.7.0"
+}
+
+optimization = "2"
+
+// **`os` and `heap`** for the grid's storage and the screenshot; **`posix`** because SDL opens a
+// window and talks to a window server.
+requires {
+  os    = true
+  posix = true
+  heap  = true
+}
+
+// `parsing` reads RLE and rule notation; `syslui-sdl` is the viewer, and reaches syslUI, SDL3 and
+// PlutoVG through it.
+dependencies {
+  parsing    { git = "github.com/sysl-lang/parsing",    version = "0.13.2" }
+  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.7" }
+}

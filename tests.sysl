@@ -1,0 +1,383 @@
+@tests
+
+// What the automaton computes, checked against something it did not compute itself: a cell-by-cell
+// step written the obvious way, which the word-at-a-time step must agree with bit for bit, and the
+// known behaviour of patterns whose periods and motions are part of the Life literature.
+
+import sysl.rand.rng
+
+// -- the oracle --------------------------------------------------------------------------------------
+
+// One generation, one cell at a time: count the eight neighbours, look the count up in the rule.
+// `get` already answers wrapped cells on a torus and dead ones beyond a bounded edge.
+private naive_step(g: Grid, rule: Rule) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    val (birth, survive) = rule match
+        LifeLike(b, s) -> (b, s)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            var n = 0
+
+            for dy in -1..1
+                for dx in -1..1
+                    if (dx != 0 || dy != 0) && g.get(x + dx, y + dy) then n += 1
+
+            val mask = if g.get(x, y) then survive else birth
+
+            if (mask >> n) & 1 == 1 then out.set(x, y, true)
+
+    out
+end naive_step
+
+private life() -> Rule = parse_rule("B3/S23").unwrap()
+
+private cells(g: Grid) -> string
+    var out = ""
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if g.get(x, y) then out = s"${out}(${x},${y})"
+
+    out
+
+private from(text: string, width: int, height: int, edges: Edges, x: int, y: int) -> Grid
+    var g = grid(width, height, edges)
+
+    parse_rle(text).unwrap().stamp(&g, x, y)
+    g
+
+private run(g: *Grid, rule: Rule, n: int)
+    for i in 0..<n
+        g.step(rule)
+
+// -- rules -------------------------------------------------------------------------------------------
+
+@test("B3/S23 is births {3} and survivals {2, 3}")
+rule_life()
+    assert(life().same(LifeLike(0b1000, 0b1100)))
+
+@test("the other spellings of Life read as the same rule")
+rule_spellings()
+    for text in ["S23/B3", "23/3", "b3/s23", "  B3/S23  "]
+        assert(parse_rule(text).unwrap().same(life()))
+
+@test("Seeds has an empty survival half")
+rule_seeds()
+    assert(parse_rule("B2/S").unwrap().same(LifeLike(0b100, 0)))
+
+@test("every preset reads back to its own notation")
+rule_round_trip()
+    for text in preset_rules()
+        assert_eq(parse_rule(text).unwrap().notation(), text)
+
+    assert_eq(parse_rule("S32/B3").unwrap().notation(), "B3/S23")
+
+@test("a rule that is not B/S notation is refused, pointing at the culprit")
+rule_errors()
+    val cases = [
+        ("", "a rule is needed", 0),
+        ("B9/S23", "8 neighbours", 1),
+        ("B33/S23", "appears twice", 2),
+        ("B3S23", "expected `/`", 2),
+        ("B2a/S12", "isotropic non-totalistic", 2),
+        ("X3/S23", "expected a rule", 0),
+        ("B3/S23V", "unexpected text", 6),
+        ("B3/23", "expected `S`", 3),
+        ("23", "expected `/`", 2),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rule(text).unwrap_err()
+
+        assert(d.message.contains(says))
+        assert_eq(d.span.start, usize(at))
+
+// -- the fast step against the oracle ----------------------------------------------------------------
+
+@test("the word-at-a-time step agrees with the naive one on random grids, every rule, both edges")
+fast_matches_naive()
+    val rules = ["B3/S23", "B36/S23", "B2/S", "B3678/S34678", "B1357/S1357", "B0/S8"]
+    val widths = [1, 5, 63, 64, 65, 130]
+    var g = rng(7, 3)
+
+    for r in 0..<rules.len
+        val rule = parse_rule(rules[r]).unwrap()
+
+        for w in 0..<widths.len
+            for e in [Torus, Bounded]
+                var fast = grid(widths[w], 23, e)
+
+                fast.randomize(&g, 40)
+
+                for gen in 0..<12
+                    val slow = naive_step(fast, rule)
+
+                    fast.step(rule)
+                    assert(fast.same_cells(slow))
+end fast_matches_naive
+
+@test("the Gosper gun runs 120 generations exactly as the oracle says, and fires")
+gun_matches_naive()
+    var fast = from(GOSPER_GUN, 90, 60, Bounded, 2, 2)
+    var slow = from(GOSPER_GUN, 90, 60, Bounded, 2, 2)
+    val start = fast.population()
+
+    for gen in 0..<120
+        fast.step(life())
+        slow = naive_step(slow, life())
+        assert(fast.same_cells(slow))
+
+    assert(fast.population() > start)
+
+@test("the padding bits past the width never come alive")
+padding_stays_dead()
+    // B0 brings every dead cell to life, so a padding bit that leaked into the count would show.
+    for w in [1, 63, 64, 65, 100]
+        var g = grid(w, 3, Torus)
+
+        g.step(parse_rule("B0/S").unwrap())
+        assert_eq(g.population(), w * 3)
+
+// -- known patterns ----------------------------------------------------------------------------------
+
+@test("a blinker has period 2")
+blinker_period()
+    var g = from("x = 3, y = 1\n3o!", 9, 9, Bounded, 3, 4)
+    val start = cells(g)
+
+    g.step(life())
+    assert(cells(g) != start)
+    assert_eq(cells(g), "(4,3)(4,4)(4,5)")
+    g.step(life())
+    assert_eq(cells(g), start)
+
+@test("a pulsar has period 3")
+pulsar_period()
+    var g = from(PULSAR, 21, 21, Bounded, 4, 4)
+    val start = cells(g)
+
+    for gen in 1..2
+        g.step(life())
+        assert(cells(g) != start)
+
+    g.step(life())
+    assert_eq(cells(g), start)
+
+@test("a glider moves one cell down and one right every 4 generations")
+glider_moves()
+    for e in [Torus, Bounded]
+        var g = from(GLIDER, 20, 20, e, 5, 5)
+
+        run(&g, life(), 4)
+        assert_eq(cells(g), cells(from(GLIDER, 20, 20, e, 6, 6)))
+
+@test("still lifes do not change")
+still_lifes()
+    val shapes = [
+        "x = 2, y = 2\n2o$2o!",
+        "x = 4, y = 3\nb2ob$o2bo$b2o!",
+        "x = 4, y = 4\nb2ob$o2bo$bobo$2bo!",
+        "x = 3, y = 3\n2ob$obo$bo!",
+    ]
+
+    for i in 0..<shapes.len
+        var g = from(shapes[i], 10, 10, Bounded, 3, 3)
+        val start = cells(g)
+
+        run(&g, life(), 5)
+        assert_eq(cells(g), start)
+
+// -- edges -------------------------------------------------------------------------------------------
+
+@test("on a torus a glider leaves by one corner and comes back in by the opposite one")
+torus_wraps()
+    // On an 8 by 8 torus, 32 generations carry a glider 8 cells each way: once round.
+    var g = from(GLIDER, 8, 8, Torus, 6, 6)
+    val start = cells(g)
+
+    run(&g, life(), 16)
+    assert(cells(g) != start)
+    assert_eq(cells(g), cells(from(GLIDER, 8, 8, Torus, 10, 10)))
+    run(&g, life(), 16)
+    assert_eq(cells(g), start)
+
+@test("a blinker across the seam of a torus oscillates as if there were no seam")
+torus_seam()
+    var g = grid(6, 6, Torus)
+
+    g.set(5, 0, true)
+    g.set(0, 0, true)
+    g.set(1, 0, true)
+    g.step(life())
+    assert_eq(cells(g), "(0,0)(0,1)(0,5)")
+    g.step(life())
+    assert_eq(cells(g), "(0,0)(1,0)(5,0)")
+
+@test("against a bounded edge the cell that would be born outside is not, and the blinker dies")
+bounded_edge_kills()
+    var g = grid(6, 6, Bounded)
+
+    g.set(0, 1, true)
+    g.set(0, 2, true)
+    g.set(0, 3, true)
+    g.step(life())
+    assert_eq(cells(g), "(0,2)(1,2)")
+    g.step(life())
+    assert_eq(g.population(), 0)
+
+    // The same blinker on a torus finds its third cell on the far side.
+    var t = grid(6, 6, Torus)
+
+    t.set(0, 1, true)
+    t.set(0, 2, true)
+    t.set(0, 3, true)
+    t.step(life())
+    assert_eq(cells(t), "(0,2)(1,2)(5,2)")
+
+@test("a cell set off a bounded grid is dropped, and off a torus wraps")
+set_outside()
+    var b = grid(4, 4, Bounded)
+
+    b.set(-1, 2, true)
+    b.set(4, 0, true)
+    assert_eq(b.population(), 0)
+
+    var t = grid(4, 4, Torus)
+
+    t.set(-1, 2, true)
+    t.set(4, 5, true)
+    assert_eq(cells(t), "(0,1)(3,2)")
+
+// -- RLE ---------------------------------------------------------------------------------------------
+
+@test("the glider reads as its name, its box, its rule and its five cells")
+rle_glider()
+    val p = parse_rle(GLIDER).unwrap()
+
+    assert_eq(p.name, "Glider")
+    assert_eq(p.width, 3)
+    assert_eq(p.height, 3)
+    assert(p.rule.unwrap().same(life()))
+    assert_eq(cells(from(GLIDER, 3, 3, Bounded, 0, 0)), "(1,0)(2,1)(0,2)(1,2)(2,2)")
+
+@test("every bundled pattern reads, names itself, and fits its own header's box")
+rle_bundled()
+    val patterns = bundled()
+
+    for i in 0..<patterns.len
+        val p = parse_rle(patterns[i]).unwrap()
+
+        assert(p.name != "")
+        assert(p.live.len() > 0)
+
+        for k in 0..<p.live.len()
+            val c = p.live[k]
+
+            assert(c.x >= 0 && c.x < p.width && c.y >= 0 && c.y < p.height)
+
+@test("a run count before `$` skips rows, and a row break inside a run list is ignored")
+rle_runs()
+    assert_eq(cells(from("x = 2, y = 3\no2$\nbo!", 2, 3, Bounded, 0, 0)), "(0,0)(1,2)")
+    assert_eq(cells(from("x = 4, y = 1\n2\no2b!", 4, 1, Bounded, 0, 0)), "(0,0)(1,0)")
+
+@test("a header with no rule leaves the rule to the caller, and the old S/B spelling is read")
+rle_rules()
+    assert(parse_rle("x = 1, y = 1\no!").unwrap().rule.is_none())
+    assert(parse_rle("x = 1, y = 1, rule = 23/36\no!").unwrap().rule.unwrap()
+        .same(parse_rule("B36/S23").unwrap()))
+
+@test("malformed RLE is refused with a diagnostic at the place it went wrong")
+rle_errors()
+    val cases = [
+        ("", "no `x = …, y = …` header", 0),
+        ("#C only a comment\n", "no `x = …, y = …` header", 18),
+        ("x = 3\n3o!", "expected `,`", 5),
+        ("y = 3, x = 3\n3o!", "expected `x =`", 0),
+        ("x = 3, y = 1\n4o!", "wider than the header's x = 3", 13),
+        ("x = 2, y = 1\nbo$o!", "more rows than the header's y = 1", 16),
+        ("x = 3, y = 3\nbo$2bo", "without its closing `!`", 19),
+        ("x = 3, y = 3\nbAo!", "`A` is not `b`, `o`, `$` or `!`", 14),
+        ("x = 3, y = 3\n0o!", "at least 1", 13),
+        ("x = 3, y = 3, rule = B9/S23\n!", "8 neighbours", 22),
+        ("x = 3, y = 3, rule = Life\n!", "expected a rule", 21),
+        ("x = 3, y = 3 junk\n!", "unexpected text after the header", 13),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rle(text).unwrap_err()
+
+        assert(d.message.contains(says))
+        assert_eq(d.span.start, usize(at))
+end rle_errors
+
+// -- the viewer's state ------------------------------------------------------------------------------
+
+@test("a rule typed into the viewer is applied, and its text normalised")
+model_rule_typed()
+    val m = model(grid(16, 16, Torus), life())
+
+    m.use_rule("s23/b36")
+    assert(m.rule.same(parse_rule("B36/S23").unwrap()))
+    assert_eq(m.rule_text.read(), "B36/S23")
+    assert_eq(m.message.read(), "rule B36/S23")
+
+@test("a rule the viewer cannot read leaves the running rule alone and says why, and where")
+model_rule_refused()
+    val m = model(grid(16, 16, Torus), life())
+
+    m.use_rule("B39/S23")
+    assert(m.rule.same(life()))
+    assert(m.message.read().contains("8 neighbours"))
+    assert(m.message.read().contains("column 3"))
+
+    m.use_rule("")
+    assert(m.rule.same(life()))
+    assert(m.message.read().contains("a rule is needed"))
+
+@test("loading a pattern clears the board, centres it, and adopts the rule it names")
+model_load()
+    val m = model(grid(16, 16, Bounded), parse_rule("B2/S").unwrap())
+
+    m.grid.set(0, 0, true)
+    m.advance(3)
+    m.load(parse_rle(GLIDER).unwrap())
+    assert_eq(m.generation.read(), 0)
+    assert(m.rule.same(life()))
+    assert_eq(cells(m.grid), "(7,6)(8,7)(6,8)(7,8)(8,8)")
+    assert_eq(m.message.read(), "Glider")
+
+@test("a running viewer owes generations at its speed, and a paused one owes none")
+model_tick()
+    val m = model(grid(16, 16, Torus), life())
+
+    tick(m, 1.0)
+    assert_eq(m.generation.read(), 0)
+
+    m.running = true
+    m.speed = 3
+    tick(m, 0.25)
+    tick(m, 0.25)
+    assert_eq(m.generation.read(), 5)
+
+    // A long stall runs at most a frame's worth, and forgets the rest.
+    tick(m, 100.0)
+    assert_eq(m.generation.read(), 5 + MOST_PER_FRAME)
+
+@test("--rule wins over the pattern's rule, which wins over Life, and a bad --rule is refused")
+cli_rule()
+    val named = parse_rle("x = 1, y = 1, rule = B36/S23\no!").unwrap()
+    val plain = parse_rle("x = 1, y = 1\no!").unwrap()
+
+    assert(chosen_rule("", plain).unwrap().same(life()))
+    assert(chosen_rule("", named).unwrap().same(parse_rule("B36/S23").unwrap()))
+    assert(chosen_rule("B2/S", named).unwrap().same(parse_rule("B2/S").unwrap()))
+
+    val e = chosen_rule("B2/S9", named).unwrap_err()
+
+    assert(e.contains("--rule could not be read"))
+    assert(e.contains("8 neighbours"))
+    assert(e.contains("--rule:1:5"))

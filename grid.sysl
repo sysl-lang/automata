@@ -1,0 +1,207 @@
+// A two-state grid, packed one cell per bit, stepped a whole machine word at a time.
+//
+// **Cell `x` of a row is bit `x % 64` of word `x / 64`**, and a row is as many words as its width
+// needs. The bits past the width in a row's last word are always zero: every step masks them off, and
+// every count and comparison may rely on it.
+//
+// **A step never looks at one cell.** The eight neighbours of all 64 cells in a word are eight words —
+// the rows above and below and the row itself, each shifted one place either way — and those are
+// summed by bit-sliced addition into four words holding a 4-bit count per cell. Comparing that count
+// against the rule's births and survivals is a handful of ANDs per count, so a word's 64 cells cost
+// what one cell would cost done naively.
+
+import sysl.buf.{Buf, buf_filled}
+import sysl.rand.Rng
+
+// What lies beyond the grid's edges.
+enum Edges
+    // The grid wraps: the column left of 0 is the last one, the row above 0 is the last one.
+    Torus
+    // The grid is surrounded by cells that are dead and stay dead.
+    Bounded
+
+struct Grid
+    width: int
+    height: int
+    edges: Edges
+    // Words per row.
+    stride: int
+    cells: Buf[u64]
+    // The other generation, written by `step` and then swapped in.
+    spare: Buf[u64]
+
+    // Is the cell at `x`, `y` alive? Coordinates outside the grid wrap on a torus and are dead when
+    // bounded.
+    get(self, x: int, y: int) -> bool
+        self.inside(x, y) match
+            Some((cx, cy)) -> (self.cells[self.word_at(cx / 64, cy)] >> u64(cx % 64)) & 1 == 1
+            None -> false
+
+    // Set the cell at `x`, `y`, wrapping on a torus and ignoring a cell outside a bounded grid.
+    set(*self, x: int, y: int, alive: bool)
+        self.inside(x, y) match
+            Some((cx, cy)) ->
+                val i = self.word_at(cx / 64, cy)
+                val bit = u64(1) << u64(cx % 64)
+
+                self.cells[i] = if alive then self.cells[i] | bit else self.cells[i] & ~bit
+            None -> ()
+
+    toggle(*self, x: int, y: int) = self.set(x, y, !self.get(x, y))
+
+    clear(*self)
+        for i in 0..<self.cells.len()
+            self.cells[i] = 0
+
+    // How many cells are alive.
+    population(self) -> int
+        var n = 0
+
+        for i in 0..<self.cells.len()
+            n += int(self.cells[i].count_ones())
+
+        n
+
+    // Every cell alive with probability `percent` in a hundred.
+    randomize(*self, g: *Rng, percent: int)
+        self.clear()
+
+        for y in 0..<self.height
+            for x in 0..<self.width
+                if int(g.below(100)) < percent then self.set(x, y, true)
+
+    // Do the two grids hold the same cells? Their shapes must agree as well.
+    same_cells(self, other: Grid) -> bool
+        if self.width != other.width || self.height != other.height then return false
+
+        for i in 0..<self.cells.len()
+            if self.cells[i] != other.cells[i] then return false
+
+        true
+
+    // Advance one generation under `rule`.
+    step(*self, rule: Rule)
+        rule match
+            LifeLike(b, s) -> self.step_life_like(b, s)
+
+    private step_life_like(*self, birth: u16, survive: u16)
+        val tail = self.tail_mask()
+
+        for y in 0..<self.height
+            for k in 0..<self.stride
+                // Bit-sliced count of the eight neighbours: bit `i` of `c0..c3` is bit 0..3 of
+                // cell `i`'s count.
+                var c0: u64 = 0
+                var c1: u64 = 0
+                var c2: u64 = 0
+                var c3: u64 = 0
+
+                for dy in -1..1
+                    val row = y + dy
+                    val mid = self.row_word(row, k)
+                    val n1 = self.west(row, k, mid)
+                    val n2 = self.east(row, k, mid)
+
+                    c0, c1, c2, c3 = add(c0, c1, c2, c3, n1)
+                    c0, c1, c2, c3 = add(c0, c1, c2, c3, n2)
+
+                    if dy != 0 then c0, c1, c2, c3 = add(c0, c1, c2, c3, mid)
+
+                // Which cells' counts are a birth count, and which a survival count.
+                var born: u64 = 0
+                var stays: u64 = 0
+
+                for n in 0..9
+                    val b = (birth >> n) & 1 == 1
+                    val s = (survive >> n) & 1 == 1
+
+                    if b || s
+                        val is_n = pick(c0, n, 0) & pick(c1, n, 1) & pick(c2, n, 2) & pick(c3, n, 3)
+
+                        if b then born |= is_n
+
+                        if s then stays |= is_n
+
+                val alive = self.cells[self.word_at(k, y)]
+                var next = (born & ~alive) | (stays & alive)
+
+                if k == self.stride - 1 then next &= tail
+
+                self.spare[self.word_at(k, y)] = next
+
+        val done = self.cells
+
+        self.cells = self.spare
+        self.spare = done
+    end step_life_like
+
+    // Word `k` of row `y`, with the row wrapped on a torus and an empty row beyond a bounded edge.
+    private row_word(self, y: int, k: int) -> u64
+        if y >= 0 && y < self.height then return self.cells[self.word_at(k, y)]
+
+        self.edges match
+            Torus -> self.cells[self.word_at(k, (y + self.height) % self.height)]
+            Bounded -> 0
+
+    // The row's west neighbours lined up under the cells they border: bit `i` is cell `i - 1`.
+    private west(self, y: int, k: int, word: u64) -> u64
+        var carry: u64 = 0
+
+        if k > 0
+            carry = self.row_word(y, k - 1) >> 63
+        elif self.edges == Torus
+            carry = self.row_bit(y, self.width - 1)
+
+        (word << 1) | carry
+
+    // The row's east neighbours: bit `i` is cell `i + 1`.
+    private east(self, y: int, k: int, word: u64) -> u64
+        var carry: u64 = 0
+
+        if k < self.stride - 1
+            carry = self.row_word(y, k + 1) << 63
+        elif self.edges == Torus
+            carry = self.row_bit(y, 0) << u64((self.width - 1) % 64)
+
+        (word >> 1) | carry
+
+    // Cell `x` of row `y` as a 0 or 1, the row resolved as `row_word` resolves it.
+    private row_bit(self, y: int, x: int) -> u64 = (self.row_word(y, x / 64) >> u64(x % 64)) & 1
+
+    // The bits of a row's last word that are cells.
+    private tail_mask(self) -> u64
+        val used = self.width - (self.stride - 1) * 64
+
+        if used == 64 then ~u64(0) else (u64(1) << u64(used)) - 1
+
+    private word_at(self, k: int, y: int) -> usize = usize(y * self.stride + k)
+
+    // The cell `x`, `y` names, or nothing if it is off a bounded grid.
+    private inside(self, x: int, y: int) -> Option[(int, int)]
+        if x >= 0 && x < self.width && y >= 0 && y < self.height then return Some((x, y))
+
+        self.edges match
+            Torus -> Some((wrap(x, self.width), wrap(y, self.height)))
+            Bounded -> None
+end Grid
+
+// An empty grid. Both sides must be at least 1.
+grid(width: int, height: int, edges: Edges) -> Grid
+    val stride = (width + 63) / 64
+    val words = usize(stride * height)
+
+    Grid(width, height, edges, stride, buf_filled(words, 0), buf_filled(words, 0))
+
+// `x` reduced into `0..<n`, for a negative `x` as well.
+wrap(x: int, n: int) -> int = ((x % n) + n) % n
+
+// One more bit added into a bit-sliced 4-bit counter, 64 lanes at once.
+private add(c0: u64, c1: u64, c2: u64, c3: u64, x: u64) -> (u64, u64, u64, u64)
+    val k1 = c0 & x
+    val k2 = c1 & k1
+    val k3 = c2 & k2
+
+    (c0 ^ x, c1 ^ k1, c2 ^ k2, c3 | k3)
+
+// The lanes whose count has bit `bit` equal to that bit of `n`.
+private pick(c: u64, n: int, bit: int) -> u64 = if (n >> bit) & 1 == 1 then c else ~c
