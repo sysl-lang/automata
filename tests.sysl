@@ -4,6 +4,7 @@
 // step written the obvious way, which the word-at-a-time step must agree with bit for bit, and the
 // known behaviour of patterns whose periods and motions are part of the Life literature.
 
+import sysl.math.min
 import sysl.rand.rng
 
 // -- the oracle --------------------------------------------------------------------------------------
@@ -369,6 +370,24 @@ model_tick()
     // A long stall runs at most a frame's worth, and forgets the rest.
     tick(m, 100.0)
     assert_eq(m.generation.read(), 5 + MOST_PER_FRAME)
+
+@test("at every speed ten seconds of sixtieths owe ten seconds' generations, and the status line names that speed")
+model_pacing()
+    for i in 0..<int(SPEEDS.len)
+        val m = model(grid(16, 16, Torus), life())
+
+        m.running = true
+        m.speed = i
+
+        for f in 0..<600
+            tick(m, 1.0 / 60.0)
+
+        val want = min(10 * SPEEDS[usize(i)], 600 * MOST_PER_FRAME)
+        val got = m.generation.read()
+
+        // A sixtieth is not exact in binary, so the last generation may still be owed.
+        assert(got >= want - 1 && got <= want, s"speed ${i}: ${got} generations, wanted ${want}")
+        assert(status(m).contains(s"   ${SPEEDS[usize(i)]}/s"), s"speed ${i}: `${status(m)}`")
 
 @test("--rule wins over the pattern's rule, which wins over Life, and a bad --rule is refused")
 cli_rule()

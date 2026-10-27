@@ -261,44 +261,24 @@ struct Grid
         self.spare = done
 
     // What word `k` of row `y` becomes under a B/S rule, its tail bits unmasked.
-    private life_word(self, y: int, k: int, birth: u16, survive: u16) -> u64
-        // Bit-sliced count of the eight neighbours: bit `i` of `c0..c3` is bit 0..3 of cell `i`'s
-        // count.
-        var c0: u64 = 0
-        var c1: u64 = 0
-        var c2: u64 = 0
-        var c3: u64 = 0
+    private life_word(self, y: int, k: int, birth: u16, survive: u16) -> u64 =
+        life_bits(self.around(y, k), birth, survive)
+
+    // The word's neighbourhood as `life_bits` and `isotropic_bits` take it: for the rows above, at
+    // and below, the row's west neighbours, the row itself and its east neighbours.
+    private around(self, y: int, k: int) -> [9]u64
+        var w: [9]u64 = [0; 9]
 
         for dy in -1..1
             val row = y + dy
             val mid = self.row_word(row, k)
-            val n1 = self.west(row, k, mid)
-            val n2 = self.east(row, k, mid)
+            val i = usize(3 * (dy + 1))
 
-            c0, c1, c2, c3 = add(c0, c1, c2, c3, n1)
-            c0, c1, c2, c3 = add(c0, c1, c2, c3, n2)
+            w[i] = self.west(row, k, mid)
+            w[i + 1] = mid
+            w[i + 2] = self.east(row, k, mid)
 
-            if dy != 0 then c0, c1, c2, c3 = add(c0, c1, c2, c3, mid)
-
-        // Which cells' counts are a birth count, and which a survival count.
-        var born: u64 = 0
-        var stays: u64 = 0
-
-        for n in 0..9
-            val b = (birth >> n) & 1 == 1
-            val s = (survive >> n) & 1 == 1
-
-            if b || s
-                val is_n = pick(c0, n, 0) & pick(c1, n, 1) & pick(c2, n, 2) & pick(c3, n, 3)
-
-                if b then born |= is_n
-
-                if s then stays |= is_n
-
-        val alive = self.cells[self.word_at(k, y)]
-
-        (born & ~alive) | (stays & alive)
-    end life_word
+        w
 
     // One generation under an isotropic rule, a cell at a time through the rule's table of answers.
     private step_isotropic(*self, h: Hensel)
@@ -317,32 +297,8 @@ struct Grid
         self.cells = self.spare
         self.spare = done
 
-    // What word `k` of row `y` becomes under an isotropic rule, its tail bits unmasked. A word's
-    // three rows are lined up as `life_word` lines them up, and the index holds the columns west of,
-    // at and east of a cell: moving one cell east drops the west column and takes the next one in
-    // from the east words, whose bit `i` is cell `i + 1`.
-    private isotropic_word(self, y: int, k: int, h: Hensel) -> u64
-        val north = self.row_word(y - 1, k)
-        val here = self.row_word(y, k)
-        val south = self.row_word(y + 1, k)
-        var en = self.east(y - 1, k, north)
-        var eh = self.east(y, k, here)
-        var es = self.east(y + 1, k, south)
-        val west = (self.west(y - 1, k, north) & 1) | ((self.west(y, k, here) & 1) << 1) |
-            ((self.west(y + 1, k, south) & 1) << 2)
-        var index = int(west | ((north & 1) << 3) | ((here & 1) << 4) | ((south & 1) << 5))
-        var next: u64 = 0
-
-        for i in 0..<64
-            index |= int((en & 1) << 6) | int((eh & 1) << 7) | int((es & 1) << 8)
-            next |= u64(h.answers[usize(index)]) << u64(i)
-            index >>= 3
-            en >>= 1
-            eh >>= 1
-            es >>= 1
-
-        next
-    end isotropic_word
+    // What word `k` of row `y` becomes under an isotropic rule, its tail bits unmasked.
+    private isotropic_word(self, y: int, k: int, h: Hensel) -> u64 = isotropic_bits(self.around(y, k), h)
 
     // One generation under a Generations rule.
     //
@@ -506,6 +462,63 @@ grid(width: int, height: int, edges: Edges) -> Grid
 
 // `x` reduced into `0..<n`, for a negative `x` as well.
 wrap(x: int, n: int) -> int = ((x % n) + n) % n
+
+// What a word of 64 cells becomes under a B/S rule. `w` is the word's neighbourhood: for the rows
+// above, at and below it, the row's west neighbours (bit `i` is cell `i - 1`), the row, and its east
+// neighbours (bit `i` is cell `i + 1`). A grid and a plane tile each line those nine words up from
+// their own storage; the step is the same.
+life_bits(w: [9]u64, birth: u16, survive: u16) -> u64
+    // Bit-sliced count of the eight neighbours: bit `i` of `c0..c3` is bit 0..3 of cell `i`'s count.
+    var c0: u64 = 0
+    var c1: u64 = 0
+    var c2: u64 = 0
+    var c3: u64 = 0
+
+    for i in 0..<9
+        if i != 4 then c0, c1, c2, c3 = add(c0, c1, c2, c3, w[usize(i)])
+
+    // Which cells' counts are a birth count, and which a survival count.
+    var born: u64 = 0
+    var stays: u64 = 0
+
+    for n in 0..9
+        val b = (birth >> n) & 1 == 1
+        val s = (survive >> n) & 1 == 1
+
+        if b || s
+            val is_n = pick(c0, n, 0) & pick(c1, n, 1) & pick(c2, n, 2) & pick(c3, n, 3)
+
+            if b then born |= is_n
+
+            if s then stays |= is_n
+
+    val alive = w[4]
+
+    (born & ~alive) | (stays & alive)
+end life_bits
+
+// What a word of 64 cells becomes under an isotropic rule, a cell at a time through the rule's table,
+// the neighbourhood `w` lined up as `life_bits` takes it. The index holds the columns west of, at and
+// east of a cell: moving one cell east drops the west column and takes the next one in from the east
+// words, whose bit `i` is cell `i + 1`.
+isotropic_bits(w: [9]u64, h: Hensel) -> u64
+    var en = w[2]
+    var eh = w[5]
+    var es = w[8]
+    val west = (w[0] & 1) | ((w[3] & 1) << 1) | ((w[6] & 1) << 2)
+    var index = int(west | ((w[1] & 1) << 3) | ((w[4] & 1) << 4) | ((w[7] & 1) << 5))
+    var next: u64 = 0
+
+    for i in 0..<64
+        index |= int((en & 1) << 6) | int((eh & 1) << 7) | int((es & 1) << 8)
+        next |= u64(h.answers[usize(index)]) << u64(i)
+        index >>= 3
+        en >>= 1
+        eh >>= 1
+        es >>= 1
+
+    next
+end isotropic_bits
 
 // One more bit added into a bit-sliced 4-bit counter, 64 lanes at once.
 private add(c0: u64, c1: u64, c2: u64, c3: u64, x: u64) -> (u64, u64, u64, u64)
