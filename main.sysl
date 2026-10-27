@@ -1,5 +1,5 @@
-// Cellular automata: a bit-packed grid, any B/S, isotropic non-totalistic or Generations rule,
-// Wolfram's elementary rules, Golly rule tables, RLE patterns, and a syslUI viewer.
+// Cellular automata: a bit-packed grid, any B/S, isotropic non-totalistic, Generations or Larger
+// than Life rule, Wolfram's elementary rules, Golly rule tables, RLE patterns, and a syslUI viewer.
 //
 //     automata [--rule <B…/S… | B…/S…/C… | W…> | --rule-file <file.rule>] [--pattern <1-8 | file.rle>]
 //              [--size <w>x<h>] [--bounded]

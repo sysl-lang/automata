@@ -1,0 +1,497 @@
+// Larger than Life: a cell's fate is the number of live cells in a neighbourhood of any range up to
+// 500, against one range of counts for birth and one for survival.
+//
+// **The notation is Golly's**, `R5,C0,M1,S34..58,B34..45,NM` — the range, the number of states, whether
+// the middle cell counts, the survival and birth ranges, and the neighbourhood's letter — and Kellie
+// Evans' five numbers, `5,34,45,34,58`, which are range, birth range and survival range on a Moore
+// neighbourhood with the middle counted. Golly writes both back in the first spelling, and so does
+// `notation`.
+//
+// **More than two states makes the rule decay like Generations**: a live cell that fails to survive
+// steps through states 2, 3, … and dies after the last, and only cells in state 1 are counted.
+//
+// **A step sums a shape, and every shape Golly knows is a handful of runs per row.** A run is a line of
+// cells, or every second cell along a row for the checkerboards, and a row's prefix sums give any
+// run's count in one subtraction — so a cell costs as many subtractions as its shape has runs,
+// about one per row of the range, whatever the range. The Moore square is all rows at once, and a
+// summed-area table gives it in four lookups.
+
+import sysl.buf.{Buf, buf, buf_filled}
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, scanner_of}
+
+// The largest range Golly accepts.
+const MOST_RANGE: int = 500
+
+// The neighbourhoods, each by the letter Golly names it with. Every one holds the middle cell, which
+// is counted or not as the rule's `M` says.
+enum Shape
+    // `NM`, the Moore square: every cell within `r` both ways.
+    Square
+    // `NN`, the von Neumann diamond: every cell within `r` steps along the axes.
+    Diamond
+    // `NC`, the circle: cells whose distance squared is at most r² + r.
+    Circular
+    // `N2`, the Euclidean disc: cells whose distance squared is at most r².
+    Euclidean
+    // `N+`, the middle row and column.
+    Cross
+    // `NX`, the two diagonals.
+    Saltire
+    // `N*`, the cross and the saltire together.
+    Star
+    // `N#`, the rows just above and below and the columns just left and right, in full.
+    Hash
+    // `NB`, the cells of the square an odd number of steps away, and the middle.
+    Checker
+    // `ND`, the cells of the square an even number of steps away.
+    AlignedChecker
+    // `NH`, a hexagon on a square grid: the square without its north-east and south-west corners.
+    Hexagonal
+    // `NA`, the hexagonal grid's three axes: the middle row and column and the north-west diagonal.
+    Asterisk
+    // `N3`, three of those axes' arms: north, west and south-east.
+    Tripod
+
+    letter(self) -> char
+        self match
+            Square -> 'M'
+            Diamond -> 'N'
+            Circular -> 'C'
+            Euclidean -> '2'
+            Cross -> '+'
+            Saltire -> 'X'
+            Star -> '*'
+            Hash -> '#'
+            Checker -> 'B'
+            AlignedChecker -> 'D'
+            Hexagonal -> 'H'
+            Asterisk -> 'A'
+            Tripod -> '3'
+
+    // The shape at range `r` as runs along its rows: every cell it holds exactly once, the middle
+    // among them.
+    runs(self, r: int) -> Buf[Run]
+        val out: Buf[Run] = buf()
+
+        for dy in -r..r
+            val a = if dy < 0 then -dy else dy
+
+            self match
+                Square -> out.push(Run(dy, -r, r, 1))
+                Diamond -> out.push(Run(dy, a - r, r - a, 1))
+                Circular -> out.push(centred(dy, half_width(r * r + r, dy)))
+                Euclidean -> out.push(centred(dy, half_width(r * r, dy)))
+                Cross -> out.push(if dy == 0 then Run(0, -r, r, 1) else Run(dy, 0, 0, 1))
+                Saltire ->
+                    if dy == 0
+                        out.push(Run(0, 0, 0, 1))
+                    else
+                        out.push(Run(dy, -a, -a, 1))
+                        out.push(Run(dy, a, a, 1))
+                Star ->
+                    if dy == 0
+                        out.push(Run(0, -r, r, 1))
+                    else
+                        out.push(Run(dy, -a, -a, 1))
+                        out.push(Run(dy, 0, 0, 1))
+                        out.push(Run(dy, a, a, 1))
+                Hash ->
+                    if a == 1
+                        out.push(Run(dy, -r, r, 1))
+                    elif dy == 0
+                        out.push(Run(0, -1, 1, 1))
+                    else
+                        out.push(Run(dy, -1, -1, 1))
+                        out.push(Run(dy, 1, 1, 1))
+                Checker ->
+                    // `dx + dy` odd: the row's ends are in when `r + dy` is odd.
+                    val k = if (r + dy) & 1 == 1 then 0 else 1
+
+                    out.push(Run(dy, k - r, r - k, 2))
+
+                    if dy == 0 then out.push(Run(0, 0, 0, 1))
+                AlignedChecker ->
+                    val k = (r + dy) & 1
+
+                    out.push(Run(dy, k - r, r - k, 2))
+                Hexagonal -> out.push(if dy < 0 then Run(dy, -r, r + dy, 1) else Run(dy, dy - r, r, 1))
+                Asterisk ->
+                    if dy == 0
+                        out.push(Run(0, -r, r, 1))
+                    else
+                        out.push(Run(dy, 0, 0, 1))
+                        out.push(Run(dy, dy, dy, 1))
+                Tripod ->
+                    out.push(if dy < 0 then Run(dy, 0, 0, 1) elif dy == 0 then Run(0, -r, 0, 1) else Run(dy, dy, dy, 1))
+
+        out
+    end runs
+end Shape
+
+// What a letter after `N` names: a shape, or the reason Golly's neighbourhood is not one here.
+private shape_of(c: u8) -> Result[Shape, string]
+    c match
+        'M' -> Ok(Square)
+        'N' -> Ok(Diamond)
+        'C' -> Ok(Circular)
+        '2' -> Ok(Euclidean)
+        '+' -> Ok(Cross)
+        'X' -> Ok(Saltire)
+        '*' -> Ok(Star)
+        '#' -> Ok(Hash)
+        'B' -> Ok(Checker)
+        'D' -> Ok(AlignedChecker)
+        'H' -> Ok(Hexagonal)
+        'A' -> Ok(Asterisk)
+        '3' -> Ok(Tripod)
+        'L' -> Err("the triangular neighbourhood `NL` needs a triangular grid, which this does not draw")
+        'W' -> Err("weighted neighbourhoods (`NW`) are not supported: a cell here counts one or nothing")
+        'G' -> Err("the Gaussian neighbourhood (`NG`) is weighted, and weighted neighbourhoods are not supported")
+        '@' -> Err("custom neighbourhoods (`N@`) are not supported")
+        _ -> Err("expected a neighbourhood: M, N, C, 2, +, X, *, #, B, D, H, A or 3")
+
+// A run of a shape: the cells `lo..hi` of row `dy`, every one of them or every second.
+struct Run
+    dy: int
+    lo: int
+    hi: int
+    step: int
+
+private centred(dy: int, w: int) -> Run = Run(dy, -w, w, 1)
+
+// The most `w` with w² + dy² ≤ `limit`: how far a disc reaches along row `dy`, as Golly measures it.
+private half_width(limit: int, dy: int) -> int
+    var w = 0
+
+    while (w + 1) * (w + 1) + dy * dy <= limit
+        w += 1
+
+    w
+
+// A Larger than Life rule, as Golly's parameters give it.
+struct Ltl
+    range: int
+    // The number of states, 2 or more: 2 is a live cell dying at once, more is Generations-style decay.
+    states: int
+    // Whether the middle cell counts toward its own survival.
+    middle: bool
+    survive_lo: int
+    survive_hi: int
+    birth_lo: int
+    birth_hi: int
+    shape: Shape
+    // The shape at this range, run by run.
+    runs: Buf[Run]
+
+    // The rule in Golly's canonical spelling, which `parse_rule` reads back to the same rule.
+    notation(self) -> string
+        val c = if self.states > 2 then self.states else 0
+        val m = if self.middle then 1 else 0
+
+        s"R${self.range},C${c},M${m},S${self.survive_lo}..${self.survive_hi},B${self.birth_lo}..${self.birth_hi},N${self.shape.letter()}"
+
+    same(self, other: Ltl) -> bool =
+        self.range == other.range && self.states == other.states && self.middle == other.middle &&
+            self.survive_lo == other.survive_lo && self.survive_hi == other.survive_hi &&
+            self.birth_lo == other.birth_lo && self.birth_hi == other.birth_hi && self.shape == other.shape
+
+    // How many cells the shape holds, the middle among them.
+    size(self) -> int
+        var n = 0
+
+        for i in 0..<self.runs.len()
+            val run = self.runs[i]
+
+            n += (run.hi - run.lo) / run.step + 1
+
+        n
+
+    // What a cell in `state` becomes, when `count` cells in state 1 lie in its shape, itself among
+    // them if it is one.
+    next(self, state: u8, count: int) -> u8
+        if state == 0 then return if count >= self.birth_lo && count <= self.birth_hi then 1 else 0
+
+        if state == 1
+            // Without the middle, a live cell's own count is one less than the shape's.
+            val n = if self.middle then count else count - 1
+
+            if n >= self.survive_lo && n <= self.survive_hi then return 1
+
+            return if self.states > 2 then 2 else 0
+
+        if int(state) + 1 < self.states then state + 1 else 0
+
+    // One generation, read from `now` and written to `next`, a byte per cell, row by row.
+    step(self, now: Buf[u8], next: Buf[u8], width: int, height: int, torus: bool)
+        val r = self.range
+        val live = ringed(now, width, height, r, torus)
+        val counts: Buf[i32] = buf_filled(usize(width * height), 0)
+
+        if self.shape == Square
+            box_counts(live, counts, width, height, r)
+        else
+            self.run_counts(live, counts, width, height)
+
+        for i in 0..<usize(width * height)
+            next[i] = self.next(now[i], int(counts[i]))
+    end step
+
+    // Each cell's count, run by run: a row's prefix sums, and for the checkerboards its prefix sums
+    // two cells apart, make each run one subtraction for the whole row of cells at once.
+    private run_counts(self, live: Buf[u8], counts: Buf[i32], width: int, height: int)
+        val r = self.range
+        val pw = width + 2 * r
+        val ph = height + 2 * r
+        val line = pw + 2
+        // `ones[row·line + k]` counts the live cells before column `k`; `twos[row·line + k + 2]` those
+        // at `k`, `k − 2`, `k − 4`, …
+        val ones: Buf[i32] = buf_filled(usize(ph * line), 0)
+        val twos: Buf[i32] = buf_filled(usize(ph * line), 0)
+
+        for py in 0..<ph
+            val base = py * line
+
+            for px in 0..<pw
+                val c = i32(live[usize(py * pw + px)])
+
+                ones[usize(base + px + 1)] = ones[usize(base + px)] + c
+                twos[usize(base + px + 2)] = twos[usize(base + px)] + c
+
+        for i in 0..<self.runs.len()
+            val run = self.runs[i]
+            val sums = if run.step == 1 then ones else twos
+            // A run from `a` to `b` is `sums[b + past] − sums[a]`.
+            val past = run.step
+
+            for y in 0..<height
+                val base = (y + r + run.dy) * line + r
+                val a = base + run.lo
+                val b = base + run.hi + past
+                val out = y * width
+
+                for x in 0..<width
+                    counts[usize(out + x)] += sums[usize(b + x)] - sums[usize(a + x)]
+    end run_counts
+end Ltl
+
+// The cells in state 1 as ones and the rest as zeros, the grid ringed by `r` more cells on every
+// side holding what lies beyond each edge: the far side's cells on a torus, dead ones when bounded.
+private ringed(now: Buf[u8], width: int, height: int, r: int, torus: bool) -> Buf[u8]
+    val pw = width + 2 * r
+    val ph = height + 2 * r
+    val live: Buf[u8] = buf_filled(usize(pw * ph), 0)
+    // The column of the grid each column of the ring copies, or -1 for one that stays dead.
+    val from: Buf[int] = buf_filled(usize(pw), 0)
+
+    for px in 0..<pw
+        val x = px - r
+
+        from[usize(px)] = if x >= 0 && x < width then x elif torus then wrap(x, width) else -1
+
+    for py in 0..<ph
+        val y = py - r
+
+        if !torus && (y < 0 || y >= height) then continue
+
+        val row = wrap(y, height) * width
+
+        for px in 0..<pw
+            val x = from[usize(px)]
+
+            if x >= 0 && now[usize(row + x)] == 1 then live[usize(py * pw + px)] = 1
+
+    live
+
+// Each cell's count over the whole square, from a summed-area table: `sat[(y + 1)·w + x + 1]` is the
+// number of live cells above and left of `x`, `y` inclusive, so any rectangle is four lookups.
+private box_counts(live: Buf[u8], counts: Buf[i32], width: int, height: int, r: int)
+    val pw = width + 2 * r
+    val ph = height + 2 * r
+    val w = pw + 1
+    val sat: Buf[i32] = buf_filled(usize(w * (ph + 1)), 0)
+
+    for py in 0..<ph
+        var across: i32 = 0
+
+        for px in 0..<pw
+            across += i32(live[usize(py * pw + px)])
+            sat[usize((py + 1) * w + px + 1)] = sat[usize(py * w + px + 1)] + across
+
+    val side = 2 * r + 1
+
+    for y in 0..<height
+        for x in 0..<width
+            val top = y * w + x
+            val bottom = (y + side) * w + x
+
+            counts[usize(y * width + x)] = sat[usize(bottom + side)] - sat[usize(top + side)] - sat[usize(bottom)] + sat[usize(top)]
+
+// Read a rule in Golly's Larger than Life notation, `R5,C0,M1,S34..58,B34..45,NM`, or in Kellie Evans'
+// `5,34,45,34,58`. Letters may be either case, as Golly reads them, and the counts are checked against
+// the shape as Golly checks them: births from 0, survivals from 1 when the middle counts, and both up to
+// the shape's size, the middle included when it counts.
+parse_ltl(text: string) -> Result[Ltl, Diagnostic]
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+
+    val first = s.peek().unwrap_or(0)
+
+    if first.is_digit() then return evans(&s, text)
+
+    letter(&s, u8('R'))?
+
+    val (r, r_at) = number(&s)?
+
+    comma(&s)?
+    letter(&s, u8('C'))?
+
+    val (c, c_at) = number(&s)?
+
+    comma(&s)?
+    letter(&s, u8('M'))?
+
+    val (m, m_at) = number(&s)?
+
+    comma(&s)?
+    letter(&s, u8('S'))?
+
+    val (s_lo, s_lo_at) = number(&s)?
+
+    dots(&s)?
+
+    val (s_hi, s_hi_at) = number(&s)?
+
+    comma(&s)?
+    letter(&s, u8('B'))?
+
+    val (b_lo, b_lo_at) = number(&s)?
+
+    dots(&s)?
+
+    val (b_hi, b_hi_at) = number(&s)?
+
+    comma(&s)?
+    letter(&s, u8('N'))?
+
+    val n_at = s.offset
+    val n = upper(s.peek().unwrap_or(0))
+
+    if s.at_end() then return Err(error(s.here(), "expected a neighbourhood after `N`, such as `NM`"))
+
+    val shape = shape_of(n).map_err(why -> error(Span(n_at, n_at + 1), why))?
+
+    s.bump()
+    end_of(&s, text)?
+
+    if m > 1 then return Err(error(m_at, "`M` is 0 or 1: whether the middle cell counts"))
+
+    rule_of(r, r_at, c, c_at, m == 1, (s_lo, s_lo_at), (s_hi, s_hi_at), (b_lo, b_lo_at), (b_hi, b_hi_at), shape)
+end parse_ltl
+
+// Kellie Evans' notation: range, the birth range and the survival range, on the Moore square with the
+// middle counted.
+private evans(s: *Scanner, text: string) -> Result[Ltl, Diagnostic]
+    val (r, r_at) = number(s)?
+
+    comma(s)?
+
+    val b_lo = number(s)?
+
+    comma(s)?
+
+    val b_hi = number(s)?
+
+    comma(s)?
+
+    val s_lo = number(s)?
+
+    comma(s)?
+
+    val s_hi = number(s)?
+
+    end_of(s, text)?
+    rule_of(r, r_at, 0, r_at, true, s_lo, s_hi, b_lo, b_hi, Square)
+
+// The rule the numbers make, or the first of them out of Golly's bounds.
+private rule_of(r: int, r_at: Span, c: int, c_at: Span, middle: bool, s_lo: (int, Span), s_hi: (int, Span),
+                b_lo: (int, Span), b_hi: (int, Span), shape: Shape) -> Result[Ltl, Diagnostic]
+    if r < 1 || r > MOST_RANGE then return Err(error(r_at, s"the range is 1 to ${MOST_RANGE}"))
+
+    if c > 256 then return Err(error(c_at, "a rule has at most 256 states"))
+
+    val runs = shape.runs(r)
+    val m = if middle then 1 else 0
+    var most = -1
+
+    for i in 0..<runs.len()
+        val run = runs[i]
+
+        most += (run.hi - run.lo) / run.step + 1
+
+    most += m
+
+    val counts = s"this neighbourhood counts 0 to ${most}"
+
+    for (n, at) in [b_lo, b_hi]
+        if n > most then return Err(error(at, s"a birth needs ${n} cells, and ${counts}"))
+
+    for (n, at) in [s_lo, s_hi]
+        if n > most then return Err(error(at, s"a survival needs ${n} cells, and ${counts}"))
+
+        if n < m then return Err(error(at, "a live cell counts itself when `M` is 1, so a survival needs at least 1"))
+
+    if s_lo.0 > s_hi.0 then return Err(error(s_hi.1, s"the survival range ends below where it starts, at ${s_lo.0}"))
+
+    if b_lo.0 > b_hi.0 then return Err(error(b_hi.1, s"the birth range ends below where it starts, at ${b_lo.0}"))
+
+    if b_lo.0 == 0 && c > 2 then return Err(error(b_lo.1, "a birth on 0 cells is refused with more than 2 states, as Golly refuses it"))
+
+    Ok(Ltl(r, if c > 2 then c else 2, middle, s_lo.0, s_hi.0, b_lo.0, b_hi.0, shape, runs))
+end rule_of
+
+// A parameter's letter, in either case.
+private letter(s: *Scanner, want: u8) -> Result[unit, Diagnostic]
+    if upper(s.peek().unwrap_or(0)) != want then return Err(error(s.here(), s"expected `${char(want)}`"))
+
+    s.bump()
+    Ok(())
+
+private comma(s: *Scanner) -> Result[unit, Diagnostic] =
+    if s.accept(u8(',')) then Ok(()) else Err(error(s.here(), "expected `,`"))
+
+private dots(s: *Scanner) -> Result[unit, Diagnostic] =
+    if s.accept_seq("..".bytes) then Ok(()) else Err(error(s.here(), "expected `..` between the two ends of a range"))
+
+// A run of decimal digits, and where it was.
+private number(s: *Scanner) -> Result[(int, Span), Diagnostic]
+    val start = s.offset
+    var n = 0
+
+    loop
+        val c = s.peek().unwrap_or(0)
+
+        if !c.is_digit() then break
+
+        if n > 1_000_000 then return Err(error(Span(start, s.offset + 1), "the number is too large"))
+
+        n = n * 10 + int(c - u8('0'))
+        s.bump()
+
+    if s.offset == start then return Err(error(s.here(), "expected a number"))
+
+    Ok((n, Span(start, s.offset)))
+
+// Nothing but blanks after the rule. Golly's `:T` and `:P` suffixes set its own grid's size, which
+// here is the command line's and the viewer's business.
+private end_of(s: *Scanner, text: string) -> Result[unit, Diagnostic]
+    s.skip_blanks()
+
+    if s.peek() == Some(u8(':'))
+        return Err(error(Span(s.offset, text.len), "a grid suffix is not read here: give --size, and --bounded for a plane"))
+
+    if !s.at_end() then return Err(error(Span(s.offset, text.len), "unexpected text after the rule"))
+
+    Ok(())
+
+private upper(c: u8) -> u8 = if c >= u8('a') && c <= u8('z') then c - 32 else c

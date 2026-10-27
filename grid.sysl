@@ -140,6 +140,10 @@ struct Grid
                 self.fresh = false
             Table(t) -> self.step_table(t)
             Generations(g) -> self.step_generations(g)
+            LargerThanLife(l) ->
+                self.keep_states()
+                l.step(self.states, self.spare_states, self.width, self.height, self.edges == Torus)
+                self.swap_states()
             Wolfram(_) -> ()
 
     // One generation under a rule table: a cell's state and its neighbours' make an index, and the
@@ -178,6 +182,12 @@ struct Grid
 
                 self.spare_states[at] = t.next[usize(index)]
 
+        self.swap_states()
+    end step_table
+
+    // Make the generation just written to `spare_states` the current one, and bring the bits into line
+    // with it.
+    private swap_states(*self)
         val done = self.states
 
         self.states = self.spare_states
@@ -191,7 +201,7 @@ struct Grid
                     if self.states[self.byte_at(k * 64 + b, y)] != 0 then word |= u64(1) << u64(b)
 
                 self.cells[self.word_at(k, y)] = word
-    end step_table
+    end swap_states
 
     // Make `states` hold every cell's state, from the bits if it has gone stale.
     private keep_states(*self)

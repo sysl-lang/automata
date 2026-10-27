@@ -27,11 +27,13 @@ enum Rule
     // One of Wolfram's elementary rules: a line of cells, each becoming what its own state and its
     // two neighbours' say. The grid holds the line's history, one generation to a row.
     Wolfram(code: u8)
+    // A Larger than Life rule: a count of live cells over a neighbourhood of any range up to 500.
+    LargerThanLife(rule: Ltl)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
-    // back to the same rule; Hensel notation in Golly's canonical spelling; Generations in Golly's
-    // survivals, births and states (`345/2/4`); `W` and the code; or a table's name from its @RULE
-    // line.
+    // back to the same rule; Hensel or Larger than Life notation in Golly's canonical spelling;
+    // Generations in Golly's survivals, births and states (`345/2/4`); `W` and the code; or a table's
+    // name from its @RULE line.
     notation(self) -> string
         self match
             LifeLike(b, s) -> s"B${counts(b)}/S${counts(s)}"
@@ -39,6 +41,7 @@ enum Rule
             Table(t) -> t.name
             Generations(g) -> s"${written(g.life.survive)}/${written(g.life.birth)}/${g.states}"
             Wolfram(code) -> s"W${code}"
+            LargerThanLife(l) -> l.notation()
 
     // Whether two rules make every cell the same: a B/S rule and the Hensel rule naming every
     // arrangement of the same counts are one rule, and so is a Generations rule of two states.
@@ -52,6 +55,7 @@ enum Rule
             (Generations(g1), Generations(g2)) ->
                 g1.states == g2.states && g1.life.birth == g2.life.birth && g1.life.survive == g2.life.survive
             (Wolfram(c1), Wolfram(c2)) -> c1 == c2
+            (LargerThanLife(l1), LargerThanLife(l2)) -> l1.same(l2)
             _ -> false
 end Rule
 
@@ -80,7 +84,7 @@ private two_state(r: Rule) -> Option[(u64, u64)] =
         LifeLike(b, s) -> Some((set_of(b), set_of(s)))
         Isotropic(h) -> Some((h.birth, h.survive))
         Generations(g) -> if g.states == 2 then Some((g.life.birth, g.life.survive)) else None
-        Table(_) | Wolfram(_) -> None
+        Table(_) | Wolfram(_) | LargerThanLife(_) -> None
 
 // The counts a mask holds, as the digits B/S notation writes them in.
 private counts(mask: u16) -> string
@@ -110,8 +114,13 @@ private counts(mask: u16) -> string
 // `345/2/4`, MCell's survivals, births, states). Hensel letters may narrow its counts as anywhere else
 // (`B2-a/S12/C5`). **`W` and a number from 0 to 255 is a Wolfram code** (`W110`).
 //
+// **A rule with a comma in it is Larger than Life** (`R5,C0,M1,S34..58,B34..45,NM`; see `ltl.sysl`),
+// since B/S notation never has one.
+//
 // Anything else is refused with a diagnostic pointing at the byte that broke it.
 parse_rule(text: string) -> Result[Rule, Diagnostic]
+    if text.contains(",") then return parse_ltl(text).map(l -> LargerThanLife(l))
+
     var s = scanner_of(text)
 
     s.skip_blanks()
@@ -145,6 +154,8 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
         if !s.accept(u8('/')) then return Err(error(s.here(), "expected `/` between the survival and birth counts"))
 
         birth = read_half(&s)?
+    elif first == u8('R') || first == u8('r')
+        return parse_ltl(text).map(l -> LargerThanLife(l))
     else
         return Err(error(Span(s.offset, s.offset + 1), "expected a rule such as B3/S23"))
 

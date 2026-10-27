@@ -1,0 +1,384 @@
+@tests
+
+// Larger than Life, checked against what it did not compute itself: each neighbourhood written as a
+// test of one offset, the way Golly's help describes it, a cell-by-cell step summing that test over the
+// whole square, Golly's own sizes for each shape, and Life written as a range-1 rule.
+
+import sysl.buf.{Buf, buf}
+import sysl.math.min
+import sysl.rand.{Rng, rng}
+
+// -- the oracle --------------------------------------------------------------------------------------
+
+// Every neighbourhood letter this reads.
+private val LETTERS = "MNC2+X*#BDHA3"
+
+private abs(n: int) -> int = if n < 0 then -n else n
+
+// Is the offset `dx`, `dy` in the neighbourhood named `letter` at range `r`? The middle is in every one;
+// `dy` grows downward.
+private member(letter: u8, r: int, dx: int, dy: int) -> bool
+    if abs(dx) > r || abs(dy) > r then return false
+
+    val middle = dx == 0 && dy == 0
+
+    letter match
+        'M' -> true
+        'N' -> abs(dx) + abs(dy) <= r
+        'C' -> dx * dx + dy * dy <= r * r + r
+        '2' -> dx * dx + dy * dy <= r * r
+        '+' -> dx == 0 || dy == 0
+        'X' -> abs(dx) == abs(dy)
+        '*' -> dx == 0 || dy == 0 || abs(dx) == abs(dy)
+        '#' -> abs(dy) == 1 || abs(dx) == 1 || middle
+        'B' -> (dx + dy) & 1 == 1 || middle
+        'D' -> (dx + dy) & 1 == 0
+        'H' -> abs(dx - dy) <= r
+        'A' -> dx == 0 || dy == 0 || dx == dy
+        '3' -> (dy < 0 && dx == 0) || (dy == 0 && dx <= 0) || (dy > 0 && dx == dy)
+        _ -> false
+
+// Golly's count of a neighbourhood's cells, the middle left out, from `max_neighbors` in its source.
+private golly_size(letter: u8, r: int) -> int
+    val side = 2 * r + 1
+
+    letter match
+        'M' -> side * side - 1
+        'N' -> 2 * r * (r + 1)
+        '+' | 'X' -> 4 * r
+        '*' | '#' -> 8 * r
+        'B' | 'D' -> (side * side - 1) / 2
+        'H' -> side * side - r * (r + 1) - 1
+        'A' -> 6 * r
+        '3' -> 3 * r
+        _ -> disc(r, if letter == 'C' then r * r + r else r * r)
+
+// A disc's cells, the middle left out, counted the way Golly counts them: row by row, as wide as fits.
+private disc(r: int, limit: int) -> int
+    var n = 0
+
+    for dy in -r..r
+        var w = 0
+
+        while (w + 1) * (w + 1) + dy * dy <= limit
+            w += 1
+
+        n += 2 * w + 1
+
+    n - 1
+
+// One generation the slow way, as Golly's help states the rule: count the state-1 cells over the
+// shape — leaving the middle out when `M` is 0 — then a dead cell is born on a count in the birth range,
+// a live cell survives on one in the survival range or else starts to decay, and a decaying cell steps
+// on toward death.
+private naive(g: Grid, l: Ltl, letter: u8) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+    val r = l.range
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            var n = 0
+
+            for dy in -r..r
+                for dx in -r..r
+                    if (dx != 0 || dy != 0 || l.middle) && member(letter, r, dx, dy) && g.state(x + dx, y + dy) == 1
+                        n += 1
+
+            val now = g.state(x, y)
+            var next: u8 = 0
+
+            if now == 0
+                if n >= l.birth_lo && n <= l.birth_hi then next = 1
+            elif now == 1
+                next = if n >= l.survive_lo && n <= l.survive_hi then 1 elif l.states > 2 then 2 else 0
+            elif int(now) < l.states - 1
+                next = now + 1
+
+            out.set_state(x, y, next)
+
+    out
+end naive
+
+// A grid of its own holding the same states.
+private copy_of(g: Grid) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            out.set_state(x, y, g.state(x, y))
+
+    out
+
+// A random grid, some cells decaying when the rule has the states for it.
+private random(g: *Rng, width: int, height: int, edges: Edges, states: int) -> Grid
+    var out = grid(width, height, edges)
+
+    out.randomize(g, 45)
+
+    if states > 2
+        for y in 0..<height
+            for x in 0..<width
+                if !out.get(x, y) && g.below(4) == 0 then out.set_state(x, y, u8(2 + int(g.below(u64(states - 2)))))
+
+    out
+
+private ltl(text: string) -> Ltl =
+    parse_rule(text).unwrap() match
+        LargerThanLife(l) -> l
+        _ -> panic(s"${text} is not Larger than Life")
+
+// A rule on the shape `letter` at range `r` whose ranges sit where something happens: births from
+// about a third to a half of the shape, survivals from a quarter to three fifths.
+private busy(letter: u8, r: int, middle: int, states: int) -> Ltl
+    val n = ltl(s"R${r},C0,M0,S0..0,B0..0,N${char(letter)}").size()
+    val b_lo = n / 3 + 1
+    val s_lo = n / 4 + middle
+
+    ltl(s"R${r},C${states},M${middle},S${s_lo}..${n * 3 / 5},B${b_lo}..${n / 2 + 1},N${char(letter)}")
+
+// Does the engine step `l` as the oracle does, generation by generation, on a random grid?
+private agrees_with_oracle(l: Ltl, letter: u8, g: *Rng, width: int, height: int, edges: Edges, generations: int)
+    var fast = random(g, width, height, edges, l.states)
+
+    for gen in 0..<generations
+        val slow = naive(fast, l, letter)
+
+        fast.step(LargerThanLife(l))
+        assert(fast.same_cells(slow))
+
+// -- shapes ------------------------------------------------------------------------------------------
+
+@test("every neighbourhood holds the cells Golly's help describes and as many as Golly counts, at ranges 1 to 9")
+ltl_shapes()
+    for i in 0..<LETTERS.len
+        val letter = LETTERS.bytes[i]
+
+        for r in 1..9
+            val l = ltl(s"R${r},C0,M0,S0..0,B0..0,N${char(letter)}")
+            var described = 0
+
+            for dy in -r..r
+                for dx in -r..r
+                    if member(letter, r, dx, dy) then described += 1
+
+            assert_eq(l.size(), described)
+            assert_eq(l.size() - 1, golly_size(letter, r))
+
+            // No run covers a cell twice, nor one outside the shape.
+            for k in 0..<l.runs.len()
+                val run = l.runs[k]
+                var x = run.lo
+
+                while x <= run.hi
+                    assert(member(letter, r, x, run.dy))
+                    x += run.step
+
+@test("the range-1 Life rule, R1,C0,M0,S2..3,B3..3,NM, steps as B3/S23 does, bit for bit, both edges")
+ltl_is_life()
+    var g = rng(11, 5)
+    val life = parse_rule("R1,C0,M0,S2..3,B3..3,NM").unwrap()
+    val totalistic = parse_rule("R1,C0,M1,S3..4,B3..3,NM").unwrap()
+
+    for width in [1, 5, 63, 64, 65, 130]
+        for e in [Torus, Bounded]
+            var a = grid(width, 19, e)
+
+            a.randomize(&g, 40)
+
+            var b = copy_of(a)
+            var c = copy_of(a)
+
+            for gen in 0..<12
+                a.step(LifeLike(0b1000, 0b1100))
+                b.step(life)
+                c.step(totalistic)
+                assert(a.same_cells(b))
+                assert(a.same_cells(c))
+
+@test("every neighbourhood steps as the cell-by-cell oracle says, at ranges 1, 2, 5 and 7, with and without the middle, both edges")
+ltl_matches_naive()
+    var g = rng(5, 9)
+
+    for i in 0..<LETTERS.len
+        val letter = LETTERS.bytes[i]
+
+        for r in [1, 2, 5, 7]
+            for middle in [0, 1]
+                val l = busy(letter, r, middle, 0)
+
+                for e in [Torus, Bounded]
+                    agrees_with_oracle(l, letter, &g, 29, 17, e, 3)
+
+@test("a grid narrower than the neighbourhood wraps onto itself on a torus as the oracle says")
+ltl_small_torus()
+    var g = rng(3, 3)
+
+    for i in 0..<LETTERS.len
+        val letter = LETTERS.bytes[i]
+
+        agrees_with_oracle(busy(letter, 5, 1, 0), letter, &g, 4, 7, Torus, 3)
+        agrees_with_oracle(busy(letter, 5, 1, 0), letter, &g, 1, 1, Bounded, 2)
+
+@test("with more than two states a live cell that fails decays through the states and only state 1 is counted, as the oracle says")
+ltl_decay()
+    var g = rng(9, 2)
+
+    for letter in "MNCB".bytes
+        for states in [3, 7, 256]
+            for e in [Torus, Bounded]
+                agrees_with_oracle(busy(letter, 3, 1, states), letter, &g, 31, 23, e, 6)
+
+    // A lone live cell under a rule nothing survives: 1, then 2, 3, 4, then dead.
+    var one = grid(5, 5, Torus)
+    val dying = parse_rule("R1,C5,M1,S9..9,B9..9,NM").unwrap()
+
+    one.set(2, 2, true)
+
+    for want in [2, 3, 4, 0]
+        one.step(dying)
+        assert_eq(one.state(2, 2), u8(want))
+
+    assert_eq(one.population(), 0)
+
+// -- Bosco's Rule ------------------------------------------------------------------------------------
+
+// The bug Kellie Evans found in Bosco's Rule, from Golly's `bosco.rle`.
+private val BUG: string = """
+    x = 12, y = 11, rule = R5,C0,M1,S34..58,B34..45,NM
+    6bo$4b5o$2b5ob2o$b5o3b2o$b4o5bo$4o5b3o$b4o3b3o$b5ob4o$2b8o$3b7o$4b5o!
+    """
+
+// The live cells, as offsets from the top left of the box they fill.
+private shape_of_cells(g: Grid) -> Buf[(int, int)]
+    var left = g.width
+    var top = g.height
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if g.get(x, y)
+                left = min(left, x)
+                top = min(top, y)
+
+    val out: Buf[(int, int)] = buf()
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if g.get(x, y) then out.push((x - left, y - top))
+
+    out
+
+@test("Bosco's bug comes back to its own shape every 166 generations, and the oracle agrees with every one of them")
+ltl_bosco()
+    val p = parse_rle(BUG).unwrap()
+    val rule = p.rule.unwrap()
+    var g = grid(48, 48, Torus)
+
+    p.stamp_centred(&g)
+
+    val start = shape_of_cells(g)
+    val l = ltl(rule.notation())
+
+    for gen in 0..<166
+        val slow = naive(g, l, 'M')
+
+        g.step(rule)
+        assert(g.same_cells(slow))
+
+    val after = shape_of_cells(g)
+
+    assert_eq(after.len(), start.len())
+
+    for i in 0..<start.len()
+        assert(after[i] == start[i])
+
+// -- notation ----------------------------------------------------------------------------------------
+
+@test("a rule reads back to Golly's canonical spelling: either case, C1 and C2 as C0, Kellie Evans' five numbers as LtL")
+ltl_notation()
+    val cases = [
+        ("R5,C0,M1,S34..58,B34..45,NM", "R5,C0,M1,S34..58,B34..45,NM"),
+        ("r5,c0,m1,s34..58,b34..45,nm", "R5,C0,M1,S34..58,B34..45,NM"),
+        ("R4,C2,M1,S41..81,B41..81,NM", "R4,C0,M1,S41..81,B41..81,NM"),
+        ("R1,C1,M0,S2..3,B3..3,NM", "R1,C0,M0,S2..3,B3..3,NM"),
+        ("R10,C255,M1,S2..3,B3..3,NM", "R10,C255,M1,S2..3,B3..3,NM"),
+        ("5,34,45,34,58", "R5,C0,M1,S34..58,B34..45,NM"),
+        ("1,3,3,3,4", "R1,C0,M1,S3..4,B3..3,NM"),
+        ("  R2,C0,M0,S1..4,B2..2,N*  ", "R2,C0,M0,S1..4,B2..2,N*"),
+        ("R500,C0,M0,S0..0,B1..1,NN", "R500,C0,M0,S0..0,B1..1,NN"),
+    ]
+
+    for i in 0..<cases.len
+        val (text, canonical) = cases[i]
+        val rule = parse_rule(text).unwrap()
+
+        assert_eq(rule.notation(), canonical)
+        assert(parse_rule(canonical).unwrap().same(rule))
+
+    for i in 0..<LETTERS.len
+        val text = s"R3,C4,M1,S2..9,B3..7,N${char(LETTERS.bytes[i])}"
+
+        assert_eq(parse_rule(text).unwrap().notation(), text)
+
+    assert(!parse_rule("R5,C0,M1,S34..58,B34..45,NM").unwrap().same(parse_rule("R5,C0,M0,S34..58,B34..45,NM").unwrap()))
+    assert(!parse_rule("R5,C0,M1,S34..58,B34..45,NM").unwrap().same(parse_rule("R5,C0,M1,S34..58,B34..45,NN").unwrap()))
+
+@test("an RLE header carries a Larger than Life rule, commas and all")
+ltl_rle()
+    val p = parse_rle(BUG).unwrap()
+
+    assert_eq(p.rule.unwrap().notation(), "R5,C0,M1,S34..58,B34..45,NM")
+    assert_eq(p.width, 12)
+
+@test("a Larger than Life rule typed into the viewer is applied in its canonical spelling, and a refused one says where")
+ltl_viewer()
+    val life = parse_rule("B3/S23").unwrap()
+    val m = model(grid(16, 16, Torus), life)
+
+    m.use_rule("5,34,45,34,58")
+    assert(m.rule.same(parse_rule("R5,C0,M1,S34..58,B34..45,NM").unwrap()))
+    assert_eq(m.rule_text.read(), "R5,C0,M1,S34..58,B34..45,NM")
+
+    m.use_rule("R5,C0,M1,S34..58,B34..45,NL")
+    assert(m.rule.same(parse_rule("R5,C0,M1,S34..58,B34..45,NM").unwrap()))
+    assert(m.message.read().contains("triangular"))
+    assert(m.message.read().contains("column 27"))
+
+@test("a rule outside what Golly accepts is refused, pointing at the culprit, and a neighbourhood it accepts that this does not run is refused by name")
+ltl_errors()
+    val cases = [
+        ("R0,C0,M0,S2..3,B3..3,NM", "range is 1 to 500", 1),
+        ("R501,C0,M0,S2..3,B3..3,NM", "range is 1 to 500", 1),
+        ("R1,C257,M0,S2..3,B3..3,NM", "at most 256 states", 4),
+        ("R1,C0,M2,S2..3,B3..3,NM", "`M` is 0 or 1", 7),
+        ("R1,C0,M0,S2..9,B3..3,NM", "counts 0 to 8", 13),
+        ("R1,C0,M1,S2..10,B3..3,NM", "counts 0 to 9", 13),
+        ("R1,C0,M1,S0..3,B3..3,NM", "at least 1", 10),
+        ("R1,C0,M0,S2..3,B3..9,NM", "counts 0 to 8", 19),
+        ("R1,C0,M0,S2..3,B3..5,NN", "counts 0 to 4", 19),
+        ("R1,C0,M0,S3..2,B3..3,NM", "ends below where it starts", 13),
+        ("R1,C0,M0,S2..3,B4..3,NM", "ends below where it starts", 19),
+        ("R1,C3,M0,S2..3,B0..3,NM", "refused with more than 2 states", 16),
+        ("R1,C0,M0,S2..3,B3..3,NQ", "expected a neighbourhood", 22),
+        ("R1,C0,M0,S2..3,B3..3,NL", "triangular", 22),
+        ("R1,C0,M0,S2..3,B3..3,NW", "weighted", 22),
+        ("R1,C0,M0,S2..3,B3..3,NG", "Gaussian", 22),
+        ("R1,C0,M0,S2..3,B3..3,N@", "custom", 22),
+        ("R1,C0,M0,S2..3,B3..3,N", "after `N`", 22),
+        ("R1,C0,M0,S2..3,B3..3,NM:T100,100", "grid suffix", 23),
+        ("R1,C0,M0,S2..3,B3..3,NMX", "unexpected text", 23),
+        ("R1,C0,M0,S2-3,B3..3,NM", "expected `..`", 11),
+        ("R1,C0,S2..3,B3..3,NM", "expected `M`", 6),
+        ("R1;C0,M0,S2..3,B3..3,NM", "expected `,`", 2),
+        ("R,C0,M0,S2..3,B3..3,NM", "expected a number", 1),
+        ("R5", "expected `,`", 2),
+        ("5,34,45,34", "expected `,`", 10),
+        ("5,34,45,34,122", "counts 0 to 121", 11),
+        ("R1,C0,M0,S99999999..3,B3..3,NM", "too large", 10),
+    ]
+
+    for i in 0..<cases.len
+        val (text, says, at) = cases[i]
+        val d = parse_rule(text).unwrap_err()
+
+        assert(d.message.contains(says))
+        assert_eq(d.span.start, usize(at))
