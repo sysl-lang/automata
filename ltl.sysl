@@ -285,7 +285,7 @@ end run_counts
 private ringed(now: Buf[u8], width: int, height: int, r: int, torus: bool, of: u8) -> Buf[u8]
     val pw = width + 2 * r
     val ph = height + 2 * r
-    val live: Buf[u8] = buf_filled(usize(pw * ph), if of == 0 then 1u8 else 0)
+    val live: Buf[u8] = buf_filled(usize(pw * ph), if of == 0 then 1 else 0)
     // The column of the grid each column of the ring copies, or -1 for one that stays dead.
     val from: Buf[int] = buf_filled(usize(pw), 0)
 

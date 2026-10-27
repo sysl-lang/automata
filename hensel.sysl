@@ -53,10 +53,11 @@ private val GOLLY = [1, 2,
 
 // How many live neighbours arrangement `a` has.
 count_of(a: int) -> int
-    for n in 1..8
-        if firsts[n] > a then return n - 1
+    var n = 8
 
-    8
+    while firsts[n] > a do n -= 1
+
+    n
 
 // The neighbours, as bits, that arrangement `a` is drawn with — one of the up to eight neighbourhoods
 // it stands for.

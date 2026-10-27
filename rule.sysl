@@ -20,7 +20,7 @@ enum Rule
     Isotropic(rule: Hensel)
     // A rule read from a Golly `.rule` file, as a table or a tree: up to 256 states, on a Moore or
     // von Neumann neighbourhood.
-    Table(table: RuleTable)
+    Table(table: &RuleTable)
     // A Generations rule: a Life-like or isotropic rule whose live cells, instead of dying, fade
     // through dying states first.
     Generations(rule: GenerationsRule)

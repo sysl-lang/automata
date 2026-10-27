@@ -92,7 +92,7 @@ parse_mcl(text: string) -> Result[Pattern, Diagnostic]
     for other in NOT_RUN
         if same_words(game, other) then return Err(error(game_at, s"MCell's ${other} rules are not run here"))
 
-    if !RUN[..].any(known -> same_words(game, known)) then return Err(error(game_at, s"`${game}` is not a family MCell names"))
+    if !RUN.any(known -> same_words(game, known)) then return Err(error(game_at, s"`${game}` is not a family MCell names"))
 
     val r = rule_of(game, rule).map_err(d -> placed(d, pieces))?
 

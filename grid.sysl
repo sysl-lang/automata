@@ -179,7 +179,7 @@ struct Grid
 
     // One generation under a rule table: a cell's state and its neighbours' make an index, and the
     // table holds what the cell becomes there. Then the bits are brought into line with the bytes.
-    private step_table(*self, t: RuleTable)
+    private step_table(*self, t: &RuleTable)
         self.keep_states()
 
         val ring = t.neighbourhood.ring()
