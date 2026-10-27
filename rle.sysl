@@ -35,6 +35,9 @@ struct Pattern
     rule_name: string
     // The cells not in state 0, relative to the pattern's top-left corner.
     live: Buf[Cell]
+    // The board's size and whether its edges wrap, where the file says (MCell's `#BOARD` and `#WRAP`).
+    board: Option[(int, int)]
+    wrap: Option[bool]
 
     // Draw the pattern into `g` with its top-left corner at `x`, `y`. Cells off a bounded grid are
     // dropped; on a torus they wrap.
@@ -54,11 +57,17 @@ struct Pattern
         most
 
     // Draw it centred; under a Wolfram rule at the top, centred across, since the rows below it are
-    // its future.
+    // its future. Under a Margolus rule the corner lands on even coordinates, so the pattern meets the
+    // blocks the first step cuts as it was drawn to.
     stamp_centred(self, g: *Grid)
         val top = if self.rule is Some(Wolfram(_)) then 0 else (g.height - self.height) / 2
+        val left = (g.width - self.width) / 2
 
-        self.stamp(g, (g.width - self.width) / 2, top)
+        if self.rule is Some(Margolus(_))
+            self.stamp(g, left - wrap(left, 2), top - wrap(top, 2))
+            return
+
+        self.stamp(g, left, top)
 end Pattern
 
 // Read an RLE pattern. A refusal is a diagnostic whose span points into `text`.
@@ -126,7 +135,7 @@ parse_rle(text: string) -> Result[Pattern, Diagnostic]
 
     read_body(&s, width, height, live)?
 
-    Ok(Pattern(name, width, height, rule, rule_name, live))
+    Ok(Pattern(name, width, height, rule, rule_name, live, None, None))
 end parse_rle
 
 // Whether a header's rule is a name, as Golly's rule files are named, rather than B/S notation: a

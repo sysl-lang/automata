@@ -1,7 +1,9 @@
 // Cellular automata: a bit-packed grid, any B/S, isotropic non-totalistic, Generations or Larger
-// than Life rule, Wolfram's elementary rules, Golly rule tables, RLE patterns, and a syslUI viewer.
+// than Life rule, Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life and
+// Margolus rules, Golly rule tables, RLE and MCell patterns, and a syslUI viewer.
 //
-//     automata [--rule <B…/S… | B…/S…/C… | W…> | --rule-file <file.rule>] [--pattern <1-8 | file.rle>]
+//     automata [--rule <B…/S… | B…/S…/C… | W… | R…/T…/C…/N… | MS,D…> | --rule-file <file.rule>]
+//              [--pattern <1-8 | file.rle | file.mcl>]
 //              [--size <w>x<h>] [--bounded]
 //     automata --shot <png> [--generations <n>] [same options]
 //
@@ -29,10 +31,20 @@ struct Options
     edges: Edges
     shot: string
     generations: int
+    // Whether `--size` and `--bounded` were given, which an MCell file's `#BOARD` and `#WRAP` give way to.
+    sized: bool
+    edged: bool
 
 main(args: []string) -> Result[unit, string]
-    val o = options(args)?
+    var o = options(args)?
     val p = pattern_of(o.pattern)?
+
+    if p.board is Some((w, h))
+        if !o.sized
+            o.width = w
+            o.height = h
+
+    if !o.edged && p.wrap == Some(false) then o.edges = Bounded
 
     val rule = if o.rule_file == "" then chosen_rule(o.rule, p)? else rule_file(o.rule_file, o.rule, p)?
     var g = grid(o.width, o.height, o.edges)
@@ -80,8 +92,8 @@ chosen_rule(given: string, p: Pattern) -> Result[Rule, string]
     else
         p.rule.unwrap_or(LifeLike(0b1000, 0b1100))
 
-    if rule is Generations(g) && int(p.most_state()) >= g.states
-        return Err(s"the pattern has cells in state ${p.most_state()}, and ${rule.notation()}'s states are 0 to ${g.states - 1}")
+    if rule.states() > 2 && int(p.most_state()) >= rule.states()
+        return Err(s"the pattern has cells in state ${p.most_state()}, and ${rule.notation()}'s states are 0 to ${rule.states() - 1}")
 
     Ok(rule)
 
@@ -98,7 +110,7 @@ rule_file(file: string, given: string, p: Pattern) -> Result[Rule, string]
     Ok(Table(t))
 
 private options(args: []string) -> Result[Options, string]
-    var o = Options("", "", "4", 192, 144, Torus, "", 100)
+    var o = Options("", "", "4", 192, 144, Torus, "", 100, false, false)
     var i = 1
 
     while i < args.len
@@ -106,6 +118,7 @@ private options(args: []string) -> Result[Options, string]
 
         if flag == "--bounded"
             o.edges = Bounded
+            o.edged = true
             i += 1
             continue
 
@@ -128,6 +141,7 @@ private options(args: []string) -> Result[Options, string]
 
             o.width = w
             o.height = h
+            o.sized = true
         else
             return Err(s"unknown option ${flag}")
 
@@ -143,7 +157,7 @@ private size_of(text: string) -> Option[(int, int)]
 
     if w < 1 || h < 1 || w > 8192 || h > 8192 then None else Some((w, h))
 
-// A bundled pattern by its number, or an RLE file by its path.
+// A bundled pattern by its number, or an RLE or MCell file by its path.
 private pattern_of(which: string) -> Result[Pattern, string]
     val patterns = bundled()
 
@@ -155,5 +169,6 @@ private pattern_of(which: string) -> Result[Pattern, string]
         Err(_) -> ()
 
     val text = read_text(which).map_err(e -> s"${which}: ${e}")?
+    val read = if text.trim().starts_with("#MCell") then parse_mcl(text) else parse_rle(text)
 
-    parse_rle(text).map_err(d -> s"${which} is not a pattern this can read\n${d.render(source_of(which, text))}")
+    read.map_err(d -> s"${which} is not a pattern this can read\n${d.render(source_of(which, text))}")

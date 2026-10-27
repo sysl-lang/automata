@@ -1,0 +1,700 @@
+@tests
+
+// MCell's rule families, checked against what they did not compute themselves: each family's rule
+// read off MCell's own description into a cell-by-cell step, Vote for Life and Weighted Life against
+// the B/S rules they are, Margolus rules run backwards by their inverses, and MCell's own example
+// patterns.
+
+import sysl.buf.{Buf, buf}
+import sysl.rand.{Rng, rng}
+import sysl.text.from_utf8
+
+private val BBM = "MS,D0;8;4;3;2;5;9;7;1;6;10;11;12;13;14;15"
+private val CRITTERS = "MS,D15;14;13;3;11;5;6;1;7;9;10;2;12;4;8;0"
+private val TRON = "MS,D15;1;2;3;4;5;6;7;8;9;10;11;12;13;14;0"
+private val HPP = "MS,D0;8;4;12;2;10;9;14;1;6;5;13;3;11;7;15"
+private val ROTATIONS = "MS,D0;4;1;10;8;3;9;11;2;6;12;14;5;7;13;15"
+private val SAND = "MS,D0;4;8;12;4;12;12;13;8;12;12;14;12;13;14;15"
+
+private val BBM_FILE = from_utf8(embed("patterns/bbm.mcl")).unwrap()
+private val TRON_FILE = from_utf8(embed("patterns/tron.mcl")).unwrap()
+private val CRITTERS_FILE = from_utf8(embed("patterns/critters.mcl")).unwrap()
+
+private abs(n: int) -> int = if n < 0 then -n else n
+
+private rule(text: string) -> Rule = parse_rule(text).unwrap()
+
+private cyclic(text: string) -> CyclicRule =
+    rule(text) match
+        Cyclic(c) -> c
+        _ -> panic(s"${text} is not cyclic")
+
+private margolus(text: string) -> MargolusRule =
+    rule(text) match
+        Margolus(m) -> m
+        _ -> panic(s"${text} is not Margolus")
+
+// A grid of its own holding the same states.
+private copy_of(g: Grid) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            out.set_state(x, y, g.state(x, y))
+
+    out.phase = g.phase
+    out
+
+// A grid of cells in states `0..<states`, at random.
+private soup(g: *Rng, width: int, height: int, edges: Edges, states: int) -> Grid
+    var out = grid(width, height, edges)
+
+    out.randomize_states(g, states)
+    out
+
+// Does the rule step the grid as `oracle` says, generation by generation?
+private agrees(r: Rule, start: Grid, generations: int, oracle: (Grid, int) -> Grid)
+    var fast = copy_of(start)
+
+    for gen in 0..<generations
+        val slow = oracle(fast, gen)
+
+        fast.step(r)
+        assert(fast.same_cells(slow), s"${r.notation()} generation ${gen + 1}, ${start.width}×${start.height}")
+
+// Each refused text, what its diagnostic says, and where it points.
+private refuses(cases: [](string, string, int))
+    for (text, says, at) in cases
+        val d = parse_rule(text).unwrap_err()
+
+        assert(d.message.contains(says), s"${text}: ${d.message}")
+        assert_eq(d.span.start, usize(at), text)
+
+// -- cyclic ------------------------------------------------------------------------------------------
+
+// One generation as MCell's page states the rule: a cell advances to the next colour, the last to 0,
+// when at least the threshold of the cells within the range — Moore's square or von Neumann's diamond,
+// itself left out — have that colour. Under Greenberg–Hastings a resting cell is excited by that many
+// excited ones, and every other colour advances regardless.
+private naive_cyclic(g: Grid, c: CyclicRule, moore: bool, gh: bool) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+    val r = c.range
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            val now = int(g.state(x, y))
+            val next = (now + 1) % c.states
+
+            if gh && now != 0
+                out.set_state(x, y, u8(next))
+                continue
+
+            var n = 0
+
+            for dy in -r..r
+                for dx in -r..r
+                    val inside = if moore then true else abs(dx) + abs(dy) <= r
+
+                    if (dx != 0 || dy != 0) && inside && int(g.state(x + dx, y + dy)) == next then n += 1
+
+            out.set_state(x, y, u8(if n >= c.threshold then next else now))
+
+    out
+
+@test("cyclic and Greenberg–Hastings rules step as MCell's description says, cell by cell, counted both ways, both edges")
+mcl_cyclic_matches_naive()
+    val rules = ["R1/T3/C3/NM", "R1/T1/C14/NN", "R2/T11/C3/NM", "R3/T5/C8/NM/GH", "R5/T23/C2/NN", "R10/T60/C3/NM",
+                 "R2/T4/C5/NM/GH", "R10/T30/C4/NN/GH", "R1/T2/C256/NM"]
+    var g = rng(4, 13)
+
+    // Both ways of counting are run: colour by colour over the grid, and cell by cell.
+    assert(cyclic("R10/T60/C3/NM").by_planes(3))
+    assert(!cyclic("R1/T1/C14/NN").by_planes(14))
+
+    for text in rules
+        val c = cyclic(text)
+
+        for (w, h) in [(1, 1), (5, 3), (29, 17), (64, 9)]
+            for e in [Torus, Bounded]
+                val start = soup(&g, w, h, e, c.states)
+
+                agrees(rule(text), start, 4, (now, gen) -> naive_cyclic(now, c, text.contains("NM"), text.contains("GH")))
+
+@test("a cyclic soup holds every colour and no other, and `--rule` refuses a pattern with colours the rule lacks")
+mcl_cyclic_soup()
+    var g = rng(5, 5)
+    val s = soup(&g, 40, 30, Torus, 5)
+    val seen: Buf[int] = buf()
+
+    for y in 0..<30
+        for x in 0..<40
+            val c = int(s.state(x, y))
+
+            assert(c < 5)
+
+            if !has(seen, c) then seen.push(c)
+
+    assert_eq(int(seen.len()), 5)
+
+    val p = parse_mcl("#MCell 4.00\n#GAME Cyclic CA\n#RULE R1/T1/C14/NN\n#L ABCD\n").unwrap()
+
+    assert(chosen_rule("R1/T3/C5/NM", p).is_ok())
+    assert(chosen_rule("R1/T3/C4/NM", p).unwrap_err().contains("state 4"))
+
+@test("a resting cell advances on exactly the threshold of next-coloured neighbours and not one fewer")
+mcl_cyclic_threshold()
+    for (count, after) in [(2, 0), (3, 1), (4, 1)]
+        var g = grid(5, 5, Torus)
+        val spots = [(1, 1), (2, 1), (3, 1), (1, 2)]
+
+        for k in 0..<count
+            val (x, y) = spots[usize(k)]
+
+            g.set_state(x, y, 1)
+
+        g.step(rule("R1/T3/C3/NM"))
+        assert_eq(int(g.state(2, 2)), after, s"${count} neighbours")
+
+@test("the last colour goes round to 0, and beyond a bounded edge every cell is in state 0")
+mcl_cyclic_wraps_round()
+    // A lone cell on a bounded grid has eight neighbours past the edge, all in state 0.
+    var g = grid(1, 1, Bounded)
+
+    g.set_state(0, 0, 2)
+    g.step(rule("R1/T8/C3/NM"))
+    assert_eq(int(g.state(0, 0)), 0)
+
+    // On a torus a lone cell is its own neighbour, and is never in the colour it looks for.
+    var t = grid(1, 1, Torus)
+
+    t.set_state(0, 0, 2)
+    t.step(rule("R1/T1/C3/NM"))
+    assert_eq(int(t.state(0, 0)), 2)
+
+@test("Greenberg–Hastings: excited, then refractory, then resting, whatever is around; a plain cyclic cell waits")
+mcl_cyclic_greenberg_hastings()
+    var g = grid(15, 15, Torus)
+
+    g.set_state(7, 7, 1)
+
+    val seen: Buf[int] = buf()
+
+    for gen in 0..<4
+        g.step(rule("R1/T1/C4/NM/GH"))
+        seen.push(int(g.state(7, 7)))
+
+    assert_eq(seen[0], 2)
+    assert_eq(seen[1], 3)
+    assert_eq(seen[2], 0)
+    // Its neighbours are refractory when it comes to rest, so nothing excites it again.
+    assert_eq(seen[3], 0)
+    // The wave the first step started has reached the next ring out.
+    var first = grid(15, 15, Torus)
+
+    first.set_state(7, 7, 1)
+    first.step(rule("R1/T1/C4/NM/GH"))
+    assert_eq(int(first.state(6, 6)), 1)
+    assert_eq(int(first.state(5, 5)), 0)
+
+    // Without `/GH` the excited cell looks for colour 2, finds none, and stays.
+    var plain = grid(15, 15, Torus)
+
+    plain.set_state(7, 7, 1)
+    plain.step(rule("R1/T1/C4/NM"))
+    assert_eq(int(plain.state(7, 7)), 1)
+    assert_eq(int(plain.state(6, 6)), 1)
+
+@test("a cyclic rule reads back to its own spelling, in either case")
+mcl_cyclic_notation()
+    for text in ["R1/T3/C3/NM", "R1/T1/C14/NN", "R3/T5/C8/NM/GH", "R10/T440/C256/NM", "R2/T4/C5/NN/GH"]
+        assert_eq(rule(text).notation(), text)
+        assert(rule(rule(text).notation()).same(rule(text)))
+
+    assert_eq(rule("r1/t3/c3/nm/gh").notation(), "R1/T3/C3/NM/GH")
+    assert(!rule("R1/T3/C3/NM").same(rule("R1/T3/C3/NM/GH")))
+    assert(!rule("R1/T3/C3/NM").same(rule("R1/T3/C3/NN")))
+    assert_eq(rule("R3/T5/C8/NM/GH").states(), 8)
+
+@test("a cyclic rule outside MCell's bounds is refused, pointing at the culprit; `R5` and a comma is still Larger than Life")
+mcl_cyclic_errors()
+    refuses([
+        ("R0/T1/C3/NM", "range is 1 to 10", 1),
+        ("R11/T1/C3/NM", "range is 1 to 10", 1),
+        ("R1/T9/C3/NM", "threshold is 1 to 8", 4),
+        ("R1/T0/C3/NM", "threshold is 1 to 8", 4),
+        ("R1/T5/C3/NN", "threshold is 1 to 4", 4),
+        ("R1/T3/C1/NM", "2 to 256 states", 7),
+        ("R1/T3/C257/NM", "2 to 256 states", 7),
+        ("R1/T3/C3/NX", "expected `NM`", 10),
+        ("R1/T3/C3", "expected `/`", 8),
+        ("R1/X3/C3/NM", "expected `T`", 3),
+        ("R1/T3/C3/NM/GX", "expected `H`", 13),
+        ("R1/T3/C3/NM/", "expected `G`", 12),
+        ("R1/T3/C3/NMX", "unexpected text", 11),
+        ("R5", "expected `,`", 2),
+    ])
+
+    assert_eq(rule("R1,C0,M0,S2..3,B3..3,NM").notation(), "R1,C0,M0,S2..3,B3..3,NM")
+
+// -- Vote for Life -----------------------------------------------------------------------------------
+
+// One generation as MCell's page states the rule: a cell is live when the number of live cells among
+// the nine — itself and its neighbours — is one of the rule's digits.
+private naive_vote(g: Grid, counts: string) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            var n = 0
+
+            for dy in -1..1
+                for dx in -1..1
+                    if g.get(x + dx, y + dy) then n += 1
+
+            out.set(x, y, counts.contains(s"${n}"))
+
+    out
+
+@test("Vote for Life steps as a count over the nine says, every one of MCell's rules and the extremes, both edges")
+mcl_vote_matches_naive()
+    var g = rng(8, 1)
+
+    for text in ["13579", "1358", "46789", "56789", "0", "9", "0123456789"]
+        for w in [1, 5, 63, 64, 65, 130]
+            for e in [Torus, Bounded]
+                var start = grid(w, 11, e)
+
+                start.randomize(&g, 45)
+                agrees(rule(text), start, 5, (now, gen) -> naive_vote(now, text))
+
+@test("Vote 46789 is the B/S rule MCell's page says it is, B4678/S35678, and reads back to its digits")
+mcl_vote_is_life_like()
+    assert(rule("46789").same(rule("B4678/S35678")))
+    assert(rule("56789").same(rule("B5678/S45678")))
+    assert(!rule("46789").same(rule("B4678/S3567")))
+    assert_eq(rule("46789").notation(), "46789")
+    assert_eq(rule("97531").notation(), "13579")
+    assert_eq(rule("0123456789").notation(), "0123456789")
+
+@test("a Vote rule with a digit twice or anything after its digits is refused there")
+mcl_vote_errors()
+    refuses([
+        ("446", "4 is given twice", 1),
+        ("46a", "unexpected text", 2),
+        ("4678 9", "unexpected text", 5),
+    ])
+
+// -- Weighted Life -----------------------------------------------------------------------------------
+
+// The keyword MCell gives the place `dx`, `dy` from a cell: a compass point, doubled along an axis, and
+// `ME` for the cell itself.
+private compass(dx: int, dy: int) -> string
+    if dx == 0 && dy == 0 then return "ME"
+
+    val ns = if dy < 0 then "N" elif dy > 0 then "S" else ""
+    val we = if dx < 0 then "W" elif dx > 0 then "E" else ""
+
+    if ns == "" then s"${we}${we}" elif we == "" then s"${ns}${ns}" else s"${ns}${we}"
+
+// The numbers given for `key` in a Weighted Life rule's text, in the order written.
+private values(text: string, key: string) -> Buf[int]
+    val out: Buf[int] = buf()
+    val b = text.bytes
+    var i = 0
+
+    while i < int(b.len)
+        val start = i
+
+        while i < int(b.len) && b[usize(i)] != u8(',')
+            i += 1
+
+        val item = text[usize(start)..<usize(i)]
+
+        if item.starts_with(key)
+            var n = 0
+            var k = key.len
+            val minus = item.bytes[k] == u8('-')
+
+            if minus then k += 1
+
+            while k < item.len
+                n = n * 10 + int(item.bytes[k] - u8('0'))
+                k += 1
+
+            out.push(if minus then -n else n)
+
+        i += 1
+
+    out
+
+private has(list: Buf[int], n: int) -> bool
+    for i in 0..<list.len()
+        if list[i] == n then return true
+
+    false
+
+// One generation as MCell's page states the rule, read off the rule's own text: the weights of the
+// live cells about a cell, itself among them, are summed; a dead cell is born on an `RB` sum, a live
+// one survives on an `RS` sum, and with `HI` above 2 a live cell that fails decays through the states
+// after it, only state 1 being live.
+private naive_weighted(g: Grid, text: string) -> Grid
+    var out = grid(g.width, g.height, g.edges)
+    val hi = if values(text, "HI").len() > 0 then values(text, "HI")[0] else 0
+    val survive = values(text, "RS")
+    val birth = values(text, "RB")
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            var sum = 0
+
+            for dy in -1..1
+                for dx in -1..1
+                    val w = values(text, compass(dx, dy))
+
+                    if w.len() > 0 && g.state(x + dx, y + dy) == 1 then sum += w[0]
+
+            val now = int(g.state(x, y))
+            var next = 0
+
+            if now == 0
+                next = if has(birth, sum) then 1 else 0
+            elif now == 1
+                next = if has(survive, sum) then 1 elif hi > 2 then 2 else 0
+            elif now + 1 < hi
+                next = now + 1
+
+            out.set_state(x, y, u8(next))
+
+    out
+end naive_weighted
+
+@test("Weighted Life steps as the sum of live weights says, with negative weights, the middle weighed, decay, keywords in any order, both edges")
+mcl_weighted_matches_naive()
+    val rules = [
+        "NW1,NN2,NE1,WW1,ME0,EE1,SW1,SS1,SE1,HI0,RS2,RS3,RB3",
+        "NW5,NN2,NE5,WW2,ME0,EE2,SW5,SS2,SE5,HI3,RS10,RS12,RS14,RS16,RB7,RB13",
+        "NW1,NN1,NE0,WW1,ME0,EE1,SW0,SS1,SE1,HI5,RS2,RS4,RS5,RB2,RB3,RB4,RB5",
+        "NW-1,NN-1,NE5,WW5,ME3,EE5,SW5,SS-1,SE-1,HI0,RS-2,RS4,RS8,RS11,RB5,RB9,RB10",
+        "RB3,ME9,NW1,NN1,NE1,WW1,EE1,SW1,SS1,SE1,RS11,RS12,HI7",
+        "NN1,SS1,WW1,EE1,HI25,RB1",
+        "NW256,SE-256,RB0,RS0,RS256,HI256",
+    ]
+    var g = rng(6, 6)
+
+    for text in rules
+        val r = rule(text)
+
+        for (w, h) in [(1, 1), (5, 3), (31, 17), (64, 9)]
+            for e in [Torus, Bounded]
+                agrees(r, soup(&g, w, h, e, r.states()), 5, (now, gen) -> naive_weighted(now, text))
+
+@test("Weighted Life with every neighbour weighing 1 and the middle 0 is Life, bit for bit, both edges")
+mcl_weighted_is_life()
+    val weighted = rule("NW1,NN1,NE1,WW1,ME0,EE1,SW1,SS1,SE1,HI0,RS2,RS3,RB3")
+    var g = rng(2, 9)
+
+    for w in [1, 5, 63, 64, 65, 130]
+        for e in [Torus, Bounded]
+            var a = grid(w, 13, e)
+
+            a.randomize(&g, 40)
+
+            var b = copy_of(a)
+
+            for gen in 0..<8
+                a.step(rule("B3/S23"))
+                b.step(weighted)
+                assert(a.same_cells(b))
+
+@test("a Weighted Life rule is written back in MCell's order, every weight given, sums ascending and once each")
+mcl_weighted_notation()
+    val career = "NW1,NN2,NE1,WW1,ME0,EE1,SW1,SS1,SE1,HI0,RS2,RS3,RB3"
+
+    assert_eq(rule(career).notation(), career)
+    assert_eq(rule("RB3,ME9,NW1,NN1,NE1,WW1,EE1,SW1,SS1,SE1,RS12,RS11,RS12,HI7").notation(),
+              "NW1,NN1,NE1,WW1,ME9,EE1,SW1,SS1,SE1,HI7,RS11,RS12,RB3")
+    assert_eq(rule("rb3").notation(), "NW0,NN0,NE0,WW0,ME0,EE0,SW0,SS0,SE0,HI0,RB3")
+    assert_eq(rule("NW-5 , RS-7").notation(), "NW-5,NN0,NE0,WW0,ME0,EE0,SW0,SS0,SE0,HI0,RS-7")
+    assert(rule(rule("SE2,HI4,RS1").notation()).same(rule("SE2,HI4,RS1")))
+    assert(!rule(career).same(rule("NW1,NN1,NE1,WW1,ME0,EE1,SW1,SS1,SE1,HI0,RS2,RS3,RB3")))
+    assert_eq(rule("HI0,RB1").states(), 2)
+    assert_eq(rule("HI2,RB1").states(), 2)
+    assert_eq(rule("HI9,RB1").states(), 9)
+
+@test("a Weighted Life rule outside MCell's bounds, or a keyword given twice, is refused there")
+mcl_weighted_errors()
+    refuses([
+        ("NW1,NW2", "NW is given twice", 4),
+        ("HI2,HI3", "HI is given twice", 4),
+        ("NW257", "a weight is -256 to 256", 2),
+        ("NW-257", "a weight is -256 to 256", 2),
+        ("NW1,XX2", "expected a keyword", 4),
+        ("NW1,", "expected a keyword", 4),
+        ("NW1;NN2", "expected `,`", 3),
+        ("HI1", "`HI` is 0", 2),
+        ("HI257", "`HI` is 0", 2),
+        ("RS2049", "a sum is -2048 to 2048", 2),
+        ("RB", "expected a number", 2),
+    ])
+
+// -- Margolus ----------------------------------------------------------------------------------------
+
+// One generation as MCell's page states the rule: the grid cut into 2×2 blocks, their corners on even
+// coordinates in even generations and odd ones in odd generations, each block's cells numbered 1, 2, 4
+// and 8 from the north-west across and down and replaced by the block the rule's list names. A block
+// that would run past a bounded edge, or wrap onto a column or row another block starts at, is left.
+private naive_margolus(g: Grid, m: MargolusRule, phase: int) -> Grid
+    var out = copy_of(g)
+    val torus = g.edges == Torus
+
+    for by in 0..<g.height
+        for bx in 0..<g.width
+            if by % 2 != phase || bx % 2 != phase then continue
+
+            // A block may wrap only where no block starts at the column or row it wraps to.
+            val x2 = if bx + 1 < g.width then bx + 1 elif torus && phase == 1 then 0 else -1
+            val y2 = if by + 1 < g.height then by + 1 elif torus && phase == 1 then 0 else -1
+
+            if x2 < 0 || y2 < 0 then continue
+
+            val cells = [(bx, by), (x2, by), (bx, y2), (x2, y2)]
+            var block = 0
+
+            for k in 0..<4
+                val (x, y) = cells[usize(k)]
+
+                if g.get(x, y) then block += [1, 2, 4, 8][usize(k)]
+
+            val to = int(m.next[usize(block)])
+
+            for k in 0..<4
+                val (x, y) = cells[usize(k)]
+
+                out.set_state(x, y, u8(if to & [1, 2, 4, 8][usize(k)] != 0 then 1 else 0))
+
+    out
+
+@test("Margolus rules step as the alternating partition says, on even and odd sizes, both edges")
+mcl_margolus_matches_naive()
+    var g = rng(12, 2)
+
+    for text in [BBM, CRITTERS, TRON, HPP, ROTATIONS, SAND]
+        val m = margolus(text)
+
+        for (w, h) in [(1, 1), (2, 2), (5, 3), (6, 8), (64, 5), (65, 9)]
+            for e in [Torus, Bounded]
+                var start = grid(w, h, e)
+
+                start.randomize(&g, 40)
+                agrees(rule(text), start, 6, (now, gen) -> naive_margolus(now, m, gen % 2))
+
+@test("a Margolus rule that is a permutation runs back to the start under its inverse, the partitions in reverse")
+mcl_margolus_reversible()
+    var g = rng(1, 21)
+
+    for text in [BBM, CRITTERS, TRON, HPP, ROTATIONS]
+        val forward = rule(text)
+        val back = Margolus(margolus(text).inverse().unwrap())
+
+        for (w, h) in [(2, 2), (5, 3), (6, 8), (64, 5), (65, 9)]
+            for e in [Torus, Bounded]
+                var start = grid(w, h, e)
+
+                start.randomize(&g, 40)
+
+                var run = copy_of(start)
+
+                for gen in 0..<13
+                    run.step(forward)
+
+                run.phase = 1 - run.phase
+
+                for gen in 0..<13
+                    run.step(back)
+
+                assert(run.same_cells(start), s"${text} ${w}×${h}")
+
+    // Sand piles grains up: two blocks become one, so there is no going back.
+    assert(margolus(SAND).inverse().is_none())
+    // Tron swaps the empty and the full block and leaves the rest, so it is its own inverse.
+    assert(margolus(TRON).inverse().unwrap().same(margolus(TRON)))
+
+@test("BBM keeps every ball, a lone ball runs diagonally, and Tron and Critters turn an empty torus full and back")
+mcl_margolus_behaviour()
+    var g = rng(3, 4)
+    var box = grid(32, 24, Torus)
+
+    box.randomize(&g, 30)
+
+    val count = box.population()
+
+    for gen in 0..<20
+        box.step(rule(BBM))
+        assert_eq(box.population(), count)
+
+    // Block 1, the north-west cell, becomes block 8: the ball crosses its block, then the next.
+    var ball = grid(10, 10, Torus)
+
+    ball.set(2, 2, true)
+    ball.step(rule(BBM))
+    assert(ball.get(3, 3))
+    ball.step(rule(BBM))
+    assert(ball.get(4, 4))
+    assert_eq(ball.population(), 1)
+
+    for text in [TRON, CRITTERS]
+        var empty = grid(8, 8, Torus)
+
+        empty.step(rule(text))
+        assert_eq(empty.population(), 64)
+        empty.step(rule(text))
+        assert_eq(empty.population(), 0)
+
+@test("a Margolus rule reads back to MCell's spelling, blanks dropped, and a malformed one is refused there")
+mcl_margolus_notation()
+    assert_eq(rule("MS,D0;8;4;3;2;5;9;7; 1;6;10;11;12;13;14;15").notation(), BBM)
+    assert_eq(rule("ms,d15;14;13;3;11;5;6;1;7;9;10;2;12;4;8;0").notation(), CRITTERS)
+    assert(rule(BBM).same(rule(rule(BBM).notation())))
+    assert(!rule(BBM).same(rule(HPP)))
+
+    refuses([
+        ("MS,D0;1", "expected `;`", 7),
+        ("MT,D0", "expected `S`", 1),
+        ("MS,D16", "0 to 15", 4),
+        ("MS;D0", "expected `,`", 2),
+        ("MS,X0", "expected `D`", 3),
+        (s"${BBM};0", "gives more", int(BBM.len)),
+        (s"${BBM}x", "unexpected text", int(BBM.len)),
+    ])
+
+// -- .mcl --------------------------------------------------------------------------------------------
+
+// MCell's example from its page on file formats, the universe of Worms.
+private val WORMS = raw"""
+    #MCell 3.00
+    #GAME Generations
+    #RULE 3467/25/6
+    #SPEED 20
+    #BOARD 300x300
+    #WRAP 0
+    #D
+    #D The universe of Worms.
+    #D
+    #D Discovered by Mirek Wojtowicz
+    #D 1999.04.08
+    #L ..DE.DED$.CE.E.DD$BDBABBC$.CACCEC$.A.BD.B$..B3C$3.3A$..4A$3.AA31$8.AA$
+    #L 7.4A$7.3A$7.3CB$6.B.DB.A$6.CECCAC$6.CBBABDB$5.DD.E.EC$5.DED.ED
+    """
+
+// The state of the pattern's cell at `x`, `y`.
+private state_in(p: Pattern, x: int, y: int) -> int
+    for i in 0..<p.live.len()
+        val c = p.live[i]
+
+        if c.x == x && c.y == y then return int(c.state)
+
+    0
+
+@test("MCell's own example file reads: its rule, board, edges, and cells in every state from its runs")
+mcl_file_worms()
+    val p = parse_mcl(WORMS).unwrap()
+
+    assert(p.rule.unwrap().same(rule("3467/25/6")))
+    assert(p.board == Some((300, 300)))
+    assert(p.wrap == Some(false))
+    // The first `#D` with words in it names the pattern.
+    assert_eq(p.name, "The universe of Worms.")
+    // `..DE.DED`: states 4 and 5 from the third column.
+    assert_eq(state_in(p, 2, 0), 4)
+    assert_eq(state_in(p, 3, 0), 5)
+    assert_eq(state_in(p, 4, 0), 0)
+    assert_eq(state_in(p, 7, 0), 4)
+    // `31$` after row 8 skips to row 39, where `8.AA` is.
+    assert_eq(state_in(p, 8, 39), 1)
+    assert_eq(state_in(p, 9, 39), 1)
+    assert_eq(p.height, 48)
+    assert_eq(int(p.most_state()), 5)
+
+@test("a rule split over `#RULE` lines is one rule, `#GAME` is any case, and a file with neither is Life's 23/3")
+mcl_file_rules()
+    val split = "#MCell 4.00\n#GAME weighted life\n#RULE NW4,NN1,NE0,WW1,ME0,EE4,SW0,SS4,SE1,HI0,RS2,RS3,RS6,RS7,RS8,RS9,\n#RULE RS11,RS12,RS13,RS14,RS15,RB5,RB10,RB11,RB14,RB15\n#L A\n"
+    val whole = "NW4,NN1,NE0,WW1,ME0,EE4,SW0,SS4,SE1,HI0,RS2,RS3,RS6,RS7,RS8,RS9,RS11,RS12,RS13,RS14,RS15,RB5,RB10,RB11,RB14,RB15"
+
+    assert(parse_mcl(split).unwrap().rule.unwrap().same(rule(whole)))
+
+    val bare = parse_mcl("#MCell 4.00\n#L 3A\n").unwrap()
+
+    assert(bare.rule.unwrap().same(rule("B3/S23")))
+    assert(bare.board.is_none())
+    assert(bare.wrap.is_none())
+    assert_eq(bare.width, 3)
+
+    for (game, text, want) in [("Vote for Life", "46789", "46789"), ("Cyclic CA", "R1/T3/C3/NM", "R1/T3/C3/NM"),
+                               ("Larger than Life", "R5,C0,M1,S34..58,B34..45,NM", "R5,C0,M1,S34..58,B34..45,NM"),
+                               ("Life", "23/36", "B36/S23")]
+        val p = parse_mcl(s"#MCell 4.00\n#GAME ${game}\n#RULE ${text}\n#L A\n").unwrap()
+
+        assert_eq(p.rule.unwrap().notation(), want)
+
+    // Two letters make a state above 24: `aB` is 26, `jO` 255.
+    val high = parse_mcl("#MCell 4.00\n#GAME Generations\n#RULE 2/3/256\n#L aB2jO\n").unwrap()
+
+    assert_eq(state_in(high, 0, 0), 26)
+    assert_eq(state_in(high, 1, 0), 255)
+    assert_eq(state_in(high, 2, 0), 255)
+
+@test("the bundled MCell patterns read, land on the blocks they were drawn for, and BBM keeps its balls")
+mcl_file_bundled()
+    for text in [BBM_FILE, TRON_FILE, CRITTERS_FILE]
+        val p = parse_mcl(text).unwrap()
+
+        assert(p.rule.unwrap().notation().starts_with("MS,D"))
+        assert(p.wrap == Some(true))
+
+    val p = parse_mcl(BBM_FILE).unwrap()
+
+    assert(p.rule.unwrap().same(rule(BBM)))
+    assert(p.board == Some((64, 48)))
+    assert_eq(p.width, 40)
+    assert_eq(p.height, 30)
+
+    // An odd board would centre the box on odd coordinates; a Margolus pattern is moved to even ones.
+    var g = grid(63, 47, Torus)
+
+    p.stamp_centred(&g)
+    assert(g.get(10, 8))
+    assert(!g.get(9, 8))
+
+    val count = g.population()
+
+    for gen in 0..<50
+        g.step(p.rule.unwrap())
+
+    assert_eq(g.population(), count)
+
+@test("a malformed MCell file is refused, pointing at the line and the byte that broke it")
+mcl_file_errors()
+    val cases = [
+        ("#Life 1.05\n", "begins with `#MCell`", "#Life"),
+        ("#MCell 4.00\nA\n", "begins with `#`", "A"),
+        ("#MCell 4.00\n#GAME Rules table\n", "not run here", "Rules table"),
+        ("#MCell 4.00\n#GAME Bowling\n", "not a family", "Bowling"),
+        ("#MCell 4.00\n#GAME Cyclic CA\n#RULE R1/T3/\n#RULE C3/NX\n", "expected `NM`", "X"),
+        ("#MCell 4.00\n#GAME Life\n#RULE 345/2/4\n", "survivals and births", "345/2/4"),
+        ("#MCell 4.00\n#GAME Generations\n#RULE 23/3\n", "states, such as", "23/3"),
+        ("#MCell 4.00\n#BOARD 300\n", "board's size", "300"),
+        ("#MCell 4.00\n#WRAP 2\n", "`#WRAP` is 1", "2"),
+        ("#MCell 4.00\n#L 2A$3?\n", "is not a cell", "?"),
+        ("#MCell 4.00\n#L 0A\n", "at least 1", "0"),
+        ("#MCell 4.00\n#L 3\n", "needs a cell", "3"),
+        ("#MCell 4.00\n#L kA\n", "is not a cell", "k"),
+        ("#MCell 4.00\n#L jZ\n", "up to state 255", "jZ"),
+        ("#MCell 4.00\n#L jP\n", "up to state 255", "jP"),
+        ("#MCell 4.00\n#GAME Cyclic CA\n#RULE R1/T3/C3/NM\n#L ABCD\n", "state 4", "Cyclic CA"),
+    ]
+
+    for (text, says, at) in cases
+        val d = parse_mcl(text).unwrap_err()
+
+        assert(d.message.contains(says), s"${text}: ${d.message}")
+        assert(text[d.span.start..<text.len].starts_with(at), s"${text}: points at ${d.span.start}")

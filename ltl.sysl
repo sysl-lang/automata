@@ -223,63 +223,69 @@ struct Ltl
 
     // One generation, read from `now` and written to `next`, a byte per cell, row by row.
     step(self, now: Buf[u8], next: Buf[u8], width: int, height: int, torus: bool)
-        val r = self.range
-        val live = ringed(now, width, height, r, torus)
-        val counts: Buf[i32] = buf_filled(usize(width * height), 0)
-
-        if self.shape == Square
-            box_counts(live, counts, width, height, r)
-        else
-            self.run_counts(live, counts, width, height)
+        val counts = shape_counts(now, 1, width, height, self.range, self.shape, self.runs, torus)
 
         for i in 0..<usize(width * height)
             next[i] = self.next(now[i], int(counts[i]))
-    end step
-
-    // Each cell's count, run by run: a row's prefix sums, and for the checkerboards its prefix sums
-    // two cells apart, make each run one subtraction for the whole row of cells at once.
-    private run_counts(self, live: Buf[u8], counts: Buf[i32], width: int, height: int)
-        val r = self.range
-        val pw = width + 2 * r
-        val ph = height + 2 * r
-        val line = pw + 2
-        // `ones[row·line + k]` counts the live cells before column `k`; `twos[row·line + k + 2]` those
-        // at `k`, `k − 2`, `k − 4`, …
-        val ones: Buf[i32] = buf_filled(usize(ph * line), 0)
-        val twos: Buf[i32] = buf_filled(usize(ph * line), 0)
-
-        for py in 0..<ph
-            val base = py * line
-
-            for px in 0..<pw
-                val c = i32(live[usize(py * pw + px)])
-
-                ones[usize(base + px + 1)] = ones[usize(base + px)] + c
-                twos[usize(base + px + 2)] = twos[usize(base + px)] + c
-
-        for i in 0..<self.runs.len()
-            val run = self.runs[i]
-            val sums = if run.step == 1 then ones else twos
-            // A run from `a` to `b` is `sums[b + past] − sums[a]`.
-            val past = run.step
-
-            for y in 0..<height
-                val base = (y + r + run.dy) * line + r
-                val a = base + run.lo
-                val b = base + run.hi + past
-                val out = y * width
-
-                for x in 0..<width
-                    counts[usize(out + x)] += sums[usize(b + x)] - sums[usize(a + x)]
-    end run_counts
 end Ltl
 
-// The cells in state 1 as ones and the rest as zeros, the grid ringed by `r` more cells on every
-// side holding what lies beyond each edge: the far side's cells on a torus, dead ones when bounded.
-private ringed(now: Buf[u8], width: int, height: int, r: int, torus: bool) -> Buf[u8]
+// How many cells in state `of` lie in each cell's neighbourhood — `shape` at range `r`, given as its
+// `runs` — read from `now`, a byte per cell, and counted a cell to an `i32`, row by row. Cyclic rules
+// count their colours with it as Larger than Life counts its live cells.
+shape_counts(now: Buf[u8], of: u8, width: int, height: int, r: int, shape: Shape, runs: Buf[Run], torus: bool) -> Buf[i32]
+    val live = ringed(now, width, height, r, torus, of)
+    val counts: Buf[i32] = buf_filled(usize(width * height), 0)
+
+    if shape == Square
+        box_counts(live, counts, width, height, r)
+    else
+        run_counts(runs, r, live, counts, width, height)
+
+    counts
+
+// Each cell's count, run by run: a row's prefix sums, and for the checkerboards its prefix sums two
+// cells apart, make each run one subtraction for the whole row of cells at once.
+private run_counts(runs: Buf[Run], r: int, live: Buf[u8], counts: Buf[i32], width: int, height: int)
     val pw = width + 2 * r
     val ph = height + 2 * r
-    val live: Buf[u8] = buf_filled(usize(pw * ph), 0)
+    val line = pw + 2
+    // `ones[row·line + k]` counts the live cells before column `k`; `twos[row·line + k + 2]` those
+    // at `k`, `k − 2`, `k − 4`, …
+    val ones: Buf[i32] = buf_filled(usize(ph * line), 0)
+    val twos: Buf[i32] = buf_filled(usize(ph * line), 0)
+
+    for py in 0..<ph
+        val base = py * line
+
+        for px in 0..<pw
+            val c = i32(live[usize(py * pw + px)])
+
+            ones[usize(base + px + 1)] = ones[usize(base + px)] + c
+            twos[usize(base + px + 2)] = twos[usize(base + px)] + c
+
+    for i in 0..<runs.len()
+        val run = runs[i]
+        val sums = if run.step == 1 then ones else twos
+        // A run from `a` to `b` is `sums[b + past] − sums[a]`.
+        val past = run.step
+
+        for y in 0..<height
+            val base = (y + r + run.dy) * line + r
+            val a = base + run.lo
+            val b = base + run.hi + past
+            val out = y * width
+
+            for x in 0..<width
+                counts[usize(out + x)] += sums[usize(b + x)] - sums[usize(a + x)]
+end run_counts
+
+// The cells in state `of` as ones and the rest as zeros, the grid ringed by `r` more cells on every
+// side holding what lies beyond each edge: the far side's cells on a torus, dead ones when bounded —
+// which are in state 0, and so are ones when that is the state counted.
+private ringed(now: Buf[u8], width: int, height: int, r: int, torus: bool, of: u8) -> Buf[u8]
+    val pw = width + 2 * r
+    val ph = height + 2 * r
+    val live: Buf[u8] = buf_filled(usize(pw * ph), if of == 0 then 1u8 else 0)
     // The column of the grid each column of the ring copies, or -1 for one that stays dead.
     val from: Buf[int] = buf_filled(usize(pw), 0)
 
@@ -298,7 +304,7 @@ private ringed(now: Buf[u8], width: int, height: int, r: int, torus: bool) -> Bu
         for px in 0..<pw
             val x = from[usize(px)]
 
-            if x >= 0 && now[usize(row + x)] == 1 then live[usize(py * pw + px)] = 1
+            if x >= 0 then live[usize(py * pw + px)] = if now[usize(row + x)] == of then 1 else 0
 
     live
 
@@ -450,21 +456,21 @@ private rule_of(r: int, r_at: Span, c: int, c_at: Span, middle: bool, s_lo: (int
     Ok(Ltl(r, if c > 2 then c else 2, middle, s_lo.0, s_hi.0, b_lo.0, b_hi.0, shape, runs))
 end rule_of
 
-// A parameter's letter, in either case.
-private letter(s: *Scanner, want: u8) -> Result[unit, Diagnostic]
+// A parameter's letter, in either case. MCell's notations are read with these as well.
+letter(s: *Scanner, want: u8) -> Result[unit, Diagnostic]
     if upper(s.peek().unwrap_or(0)) != want then return Err(error(s.here(), s"expected `${char(want)}`"))
 
     s.bump()
     Ok(())
 
-private comma(s: *Scanner) -> Result[unit, Diagnostic] =
+comma(s: *Scanner) -> Result[unit, Diagnostic] =
     if s.accept(u8(',')) then Ok(()) else Err(error(s.here(), "expected `,`"))
 
 private dots(s: *Scanner) -> Result[unit, Diagnostic] =
     if s.accept_seq("..".bytes) then Ok(()) else Err(error(s.here(), "expected `..` between the two ends of a range"))
 
 // A run of decimal digits, and where it was.
-private number(s: *Scanner) -> Result[(int, Span), Diagnostic]
+number(s: *Scanner) -> Result[(int, Span), Diagnostic]
     val start = s.offset
     var n = 0
 
@@ -484,7 +490,7 @@ private number(s: *Scanner) -> Result[(int, Span), Diagnostic]
 
 // Nothing but blanks after the rule. Golly's `:T` and `:P` suffixes set its own grid's size, which
 // here is the command line's and the viewer's business.
-private end_of(s: *Scanner, text: string) -> Result[unit, Diagnostic]
+end_of(s: *Scanner, text: string) -> Result[unit, Diagnostic]
     s.skip_blanks()
 
     if s.peek() == Some(u8(':'))
@@ -494,4 +500,4 @@ private end_of(s: *Scanner, text: string) -> Result[unit, Diagnostic]
 
     Ok(())
 
-private upper(c: u8) -> u8 = if c >= u8('a') && c <= u8('z') then c - 32 else c
+upper(c: u8) -> u8 = if c >= u8('a') && c <= u8('z') then c - 32 else c

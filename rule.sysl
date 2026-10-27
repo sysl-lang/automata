@@ -29,11 +29,21 @@ enum Rule
     Wolfram(code: u8)
     // A Larger than Life rule: a count of live cells over a neighbourhood of any range up to 500.
     LargerThanLife(rule: Ltl)
+    // MCell's cyclic cellular automata, Greenberg–Hastings among them; see `mcell.sysl`.
+    Cyclic(rule: CyclicRule)
+    // MCell's Vote for Life: bit `n` says a cell with `n` live cells among the nine, itself and its
+    // neighbours, is live next.
+    Vote(counts: u16)
+    // MCell's Weighted Life: a weight for each neighbour and the cell itself.
+    Weighted(rule: WeightedRule)
+    // A Margolus rule: 2×2 blocks, each replaced as a table of 16 says, the blocks' corners moving
+    // between even and odd coordinates every generation.
+    Margolus(rule: MargolusRule)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
     // back to the same rule; Hensel or Larger than Life notation in Golly's canonical spelling;
-    // Generations in Golly's survivals, births and states (`345/2/4`); `W` and the code; or a table's
-    // name from its @RULE line.
+    // Generations in Golly's survivals, births and states (`345/2/4`); `W` and the code; MCell's
+    // notation for MCell's families; or a table's name from its @RULE line.
     notation(self) -> string
         self match
             LifeLike(b, s) -> s"B${counts(b)}/S${counts(s)}"
@@ -42,6 +52,20 @@ enum Rule
             Generations(g) -> s"${written(g.life.survive)}/${written(g.life.birth)}/${g.states}"
             Wolfram(code) -> s"W${code}"
             LargerThanLife(l) -> l.notation()
+            Cyclic(c) -> c.notation()
+            Vote(v) -> vote_notation(v)
+            Weighted(w) -> w.notation()
+            Margolus(m) -> m.notation()
+
+    // How many states a cell may be in under the rule.
+    states(self) -> int
+        self match
+            Table(t) -> t.states
+            Generations(g) -> g.states
+            LargerThanLife(l) -> l.states
+            Cyclic(c) -> c.states
+            Weighted(w) -> w.states()
+            LifeLike(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> 2
 
     // Whether two rules make every cell the same: a B/S rule and the Hensel rule naming every
     // arrangement of the same counts are one rule, and so is a Generations rule of two states.
@@ -56,6 +80,9 @@ enum Rule
                 g1.states == g2.states && g1.life.birth == g2.life.birth && g1.life.survive == g2.life.survive
             (Wolfram(c1), Wolfram(c2)) -> c1 == c2
             (LargerThanLife(l1), LargerThanLife(l2)) -> l1.same(l2)
+            (Cyclic(c1), Cyclic(c2)) -> c1.same(c2)
+            (Weighted(w1), Weighted(w2)) -> w1.same(w2)
+            (Margolus(m1), Margolus(m2)) -> m1.same(m2)
             _ -> false
 end Rule
 
@@ -78,13 +105,31 @@ struct GenerationsRule
 
         if int(state) + 1 == self.states then 0 else state + 1
 
+// Whether the rule at the cursor begins as a cyclic rule does, `R`, a number and `/`, where Larger than
+// Life's has a comma. The cursor is left where it was.
+private cyclic_shaped(s: *Scanner) -> bool
+    val first = s.peek().unwrap_or(0)
+
+    if first != u8('R') && first != u8('r') then return false
+
+    var k = usize(1)
+
+    while s.peek_at(k).map(c -> c.is_digit()).unwrap_or(false)
+        k += 1
+
+    k > 1 && s.peek_at(k) == Some(u8('/'))
+
 // The births and survivals of a rule with two states, as sets of arrangements; none for the rest.
 private two_state(r: Rule) -> Option[(u64, u64)] =
     r match
         LifeLike(b, s) -> Some((set_of(b), set_of(s)))
         Isotropic(h) -> Some((h.birth, h.survive))
         Generations(g) -> if g.states == 2 then Some((g.life.birth, g.life.survive)) else None
-        Table(_) | Wolfram(_) | LargerThanLife(_) -> None
+        Vote(v) ->
+            val (b, s) = vote_life(v)
+
+            Some((set_of(b), set_of(s)))
+        Table(_) | Wolfram(_) | LargerThanLife(_) | Cyclic(_) | Weighted(_) | Margolus(_) -> None
 
 // The counts a mask holds, as the digits B/S notation writes them in.
 private counts(mask: u16) -> string
@@ -117,10 +162,12 @@ private counts(mask: u16) -> string
 // **A rule with a comma in it is Larger than Life** (`R5,C0,M1,S34..58,B34..45,NM`; see `ltl.sysl`),
 // since B/S notation never has one.
 //
+// **MCell's families are told apart by how they begin** (see `mcell.sysl`): a Weighted Life keyword
+// (`NW1,…`, `RS2,…`) is Weighted Life, `MS,D…` is Margolus, `R` and a range followed by `/` is a
+// cyclic rule (`R1/T3/C3/NM`), and digits with no `/` are Vote for Life (`46789`).
+//
 // Anything else is refused with a diagnostic pointing at the byte that broke it.
 parse_rule(text: string) -> Result[Rule, Diagnostic]
-    if text.contains(",") then return parse_ltl(text).map(l -> LargerThanLife(l))
-
     var s = scanner_of(text)
 
     s.skip_blanks()
@@ -128,6 +175,16 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
     if s.at_end() then return Err(error(s.here(), "a rule is needed, such as B3/S23"))
 
     val first = s.peek().unwrap()
+
+    if weighted_keyword_at(text) then return parse_weighted(text).map(w -> Weighted(w))
+
+    if first == u8('M') || first == u8('m') then return parse_margolus(text).map(m -> Margolus(m))
+
+    if cyclic_shaped(&s) then return parse_cyclic(text).map(c -> Cyclic(c))
+
+    if text.contains(",") || first == u8('R') || first == u8('r') then return parse_ltl(text).map(l -> LargerThanLife(l))
+
+    if first.is_digit() && !text.contains("/") then return parse_vote(text).map(v -> Vote(v))
     var birth = Half(0, false)
     var survive = Half(0, false)
     // Whether the halves were introduced by `B` and `S`, so that a count of states is introduced by `C`.
@@ -154,8 +211,6 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
         if !s.accept(u8('/')) then return Err(error(s.here(), "expected `/` between the survival and birth counts"))
 
         birth = read_half(&s)?
-    elif first == u8('R') || first == u8('r')
-        return parse_ltl(text).map(l -> LargerThanLife(l))
     else
         return Err(error(Span(s.offset, s.offset + 1), "expected a rule such as B3/S23"))
 

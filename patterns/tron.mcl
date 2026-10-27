@@ -1,0 +1,8 @@
+#MCell 4.00
+#GAME Margolus
+#RULE MS,D15;1;2;3;4;5;6;7;8;9;10;11;12;13;14;0
+#BOARD 128x96
+#WRAP 1
+#D Tron: a square, and the rectangles it sends out.
+#D A rule by Margolus and Toffoli, from Cellular Automata Machines.
+#L 8A$8A$8A$8A$8A$8A$8A$8A

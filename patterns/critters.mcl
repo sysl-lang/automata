@@ -1,0 +1,10 @@
+#MCell 4.00
+#GAME Margolus
+#RULE MS,D15;14;13;3;11;5;6;1;7;9;10;2;12;4;8;0
+#BOARD 128x96
+#WRAP 1
+#D Critters: a soup that sends out gliders.
+#D A rule by Margolus and Toffoli, from Cellular Automata Machines.
+#L A.AA..A.A..A$..A.AAA...AA$AA..A..A.A..$.A.A.AA..A.A$...AA..AAA..$
+#L A..A.A....AA$.AA...A.A.A.$A.A.A..AA...$..AAA.A...AA$A....AA.A.A.$
+#L .A.A..A..AA.$AA..A...A..A

@@ -1,0 +1,533 @@
+// The rule families of Mirek Wójtowicz's MCell that no other notation here covers: cyclic cellular
+// automata, Vote for Life, Weighted Life and Margolus block rules, each read in MCell's own notation.
+//
+//   - **Cyclic** (`R1/T3/C3/NM`, `R3/T5/C8/NM/GH`): range, threshold, states and neighbourhood. A cell
+//     in state `s` moves on to `s + 1`, the last state to 0, when at least the threshold of its
+//     neighbours are already there. With `/GH` it is Greenberg and Hastings' excitable medium instead:
+//     a resting cell, state 0, is excited to 1 by that many excited neighbours, and every other state
+//     moves on regardless.
+//   - **Vote for Life** (`46789`): the counts, 0 to 9, of live cells among the nine — the cell and its
+//     eight neighbours — that make a cell live. Every one is a B/S rule, and is stepped as one.
+//   - **Weighted Life** (`NW1,NN2,…,ME0,…,HI0,RS2,RS3,RB3`): a weight for each of the eight
+//     neighbours and the cell itself, the sums of live weights a live cell survives on (`RS`) and a
+//     dead one is born on (`RB`), and `HI`, the number of states when live cells decay as Generations'
+//     do, or 0.
+//   - **Margolus** (`MS,D0;8;4;3;2;5;9;7;1;6;10;11;12;13;14;15`): the grid cut into 2×2 blocks, each
+//     replaced by the block the rule names for it, the cut moving one cell down and right every other
+//     generation.
+
+import sysl.buf.{Buf, buf, buf_filled}
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, scanner_of}
+
+// The largest range MCell gives a cyclic rule.
+const MOST_CYCLIC_RANGE: int = 10
+
+// -- cyclic ------------------------------------------------------------------------------------------
+
+// A cyclic rule, or with `gh` a Greenberg–Hastings one.
+struct CyclicRule
+    range: int
+    threshold: int
+    states: int
+    // `Square` for MCell's `NM`, `Diamond` for `NN`; the middle cell never matters, since a cell is never
+    // in the state it is looking for.
+    shape: Shape
+    gh: bool
+    runs: Buf[Run]
+
+    notation(self) -> string
+        val n = if self.shape == Square then "NM" else "NN"
+        val gh = if self.gh then "/GH" else ""
+
+        s"R${self.range}/T${self.threshold}/C${self.states}/${n}${gh}"
+
+    same(self, other: CyclicRule) -> bool =
+        self.range == other.range && self.threshold == other.threshold && self.states == other.states &&
+            self.shape == other.shape && self.gh == other.gh
+
+    // How many neighbours a cell has, itself left out.
+    size(self) -> int = if self.shape == Square then (2 * self.range + 1) * (2 * self.range + 1) - 1 else 2 * self.range * (self.range + 1)
+
+    // The state after `state` on the wheel.
+    after(self, state: u8) -> u8 = if int(state) + 1 >= self.states then 0 else state + 1
+
+    // Whether a step counts colour by colour over the whole grid, as Larger than Life counts its live
+    // cells, rather than cell by cell. Each colour costs a pass about as long as the range; a cell costs
+    // its neighbours.
+    by_planes(self, colours: int) -> bool = colours * (2 * self.range + 8) < self.size()
+
+    // One generation, read from `now` and written to `next`, a byte per cell, row by row. Beyond a
+    // bounded grid's edge every cell is in state 0.
+    step(self, now: Buf[u8], next: Buf[u8], width: int, height: int, torus: bool)
+        val n = usize(width * height)
+        // The colours some cell is looking for among its neighbours.
+        val wanted: Buf[bool] = buf_filled(256, false)
+        var colours = 0
+
+        for i in 0..<n
+            next[i] = if self.gh && now[i] != 0 then self.after(now[i]) else now[i]
+
+            if !self.gh || now[i] == 0
+                val c = usize(self.after(now[i]))
+
+                if !wanted[c]
+                    wanted[c] = true
+                    colours += 1
+
+        if self.by_planes(colours)
+            for c in 0..<256
+                if !wanted[usize(c)] then continue
+
+                val counts = shape_counts(now, u8(c), width, height, self.range, self.shape, self.runs, torus)
+
+                for i in 0..<n
+                    if (!self.gh || now[i] == 0) && int(self.after(now[i])) == c && int(counts[i]) >= self.threshold
+                        next[i] = u8(c)
+
+            return
+
+        val ring = self.neighbours()
+
+        for y in 0..<height
+            for x in 0..<width
+                val i = usize(y * width + x)
+
+                if self.gh && now[i] != 0 then continue
+
+                val want = self.after(now[i])
+                var count = 0
+
+                for k in 0..<ring.len()
+                    val (dx, dy) = ring[k]
+
+                    if cell_at(now, width, height, torus, x + dx, y + dy) == want
+                        count += 1
+
+                        if count >= self.threshold then break
+
+                if count >= self.threshold then next[i] = want
+    end step
+
+    // The offsets of a cell's neighbours.
+    private neighbours(self) -> Buf[(int, int)]
+        val out: Buf[(int, int)] = buf()
+        val r = self.range
+
+        for dy in -r..r
+            for dx in -r..r
+                val far = if self.shape == Square then 0 else abs(dx) + abs(dy) - r
+
+                if (dx != 0 || dy != 0) && far <= 0 then out.push((dx, dy))
+
+        out
+end CyclicRule
+
+// Read a cyclic rule in MCell's notation, `R1/T3/C3/NM`, with `/GH` after it for Greenberg–Hastings.
+// Letters may be either case. The range is 1 to 10, as MCell has it, the states 2 to 256, and the
+// threshold 1 to the size of the neighbourhood.
+parse_cyclic(text: string) -> Result[CyclicRule, Diagnostic]
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+    letter(&s, u8('R'))?
+
+    val (r, r_at) = number(&s)?
+
+    slash(&s)?
+    letter(&s, u8('T'))?
+
+    val (t, t_at) = number(&s)?
+
+    slash(&s)?
+    letter(&s, u8('C'))?
+
+    val (c, c_at) = number(&s)?
+
+    slash(&s)?
+    letter(&s, u8('N'))?
+
+    val n_at = s.offset
+    val n = upper(s.peek().unwrap_or(0))
+
+    if n != u8('M') && n != u8('N')
+        return Err(error(Span(n_at, n_at + 1), "expected `NM` for the Moore neighbourhood or `NN` for von Neumann's"))
+
+    s.bump()
+
+    val gh = s.accept(u8('/'))
+
+    if gh
+        letter(&s, u8('G'))?
+        letter(&s, u8('H'))?
+
+    end_of(&s, text)?
+
+    if r < 1 || r > MOST_CYCLIC_RANGE then return Err(error(r_at, s"the range is 1 to ${MOST_CYCLIC_RANGE}"))
+
+    if c < 2 || c > 256 then return Err(error(c_at, "a cyclic rule has 2 to 256 states"))
+
+    val shape = if n == u8('M') then Square else Diamond
+    val rule = CyclicRule(r, t, c, shape, gh, shape.runs(r))
+
+    if t < 1 || t > rule.size()
+        return Err(error(t_at, s"the threshold is 1 to ${rule.size()}, the neighbours a cell has here"))
+
+    Ok(rule)
+end parse_cyclic
+
+private slash(s: *Scanner) -> Result[unit, Diagnostic] =
+    if s.accept(u8('/')) then Ok(()) else Err(error(s.here(), "expected `/`"))
+
+// -- Vote for Life -----------------------------------------------------------------------------------
+
+// Read a Vote for Life rule: distinct digits from 0 to 9, each a count of live cells among the nine
+// that leaves a cell live. Bit `n` of the answer is count `n`.
+parse_vote(text: string) -> Result[u16, Diagnostic]
+    var s = scanner_of(text)
+    var counts: u16 = 0
+
+    s.skip_blanks()
+
+    loop
+        val c = s.peek().unwrap_or(0)
+
+        if !c.is_digit() then break
+
+        val n = int(c - u8('0'))
+
+        if (counts >> n) & 1 == 1 then return Err(error(Span(s.offset, s.offset + 1), s"${n} is given twice"))
+
+        counts |= u16(1) << n
+        s.bump()
+
+    if counts == 0 then return Err(error(s.here(), "expected the counts, 0 to 9, of live cells among the nine that make a cell live"))
+
+    end_of(&s, text)?
+    Ok(counts)
+
+// The counts, as Vote for Life writes them.
+vote_notation(counts: u16) -> string
+    var out = ""
+
+    for n in 0..9
+        if (counts >> n) & 1 == 1 then out = s"${out}${n}"
+
+    out
+
+// The B/S rule a Vote for Life rule is: a dead cell with `n` live neighbours has `n` live cells among
+// its nine, and a live one has `n + 1`.
+vote_life(counts: u16) -> (u16, u16) = (counts & 0x1FF, (counts >> 1) & 0x1FF)
+
+// -- Weighted Life -----------------------------------------------------------------------------------
+
+// The places a weight is given for, row by row from the north-west with the cell itself in the middle,
+// by the keywords MCell gives them and in the order it writes them.
+private val PLACES = ["NW", "NN", "NE", "WW", "ME", "EE", "SW", "SS", "SE"]
+
+// The largest weight's size and the largest sum's, as MCell bounds them.
+const MOST_WEIGHT: int = 256
+const MOST_SUM: int = 2048
+
+// A Weighted Life rule. Only cells in state 1 add their weight; with history, a live cell that does not
+// survive decays through states 2, 3, … as a Generations rule's does.
+struct WeightedRule
+    // A weight for each place in `PLACES`.
+    weights: Buf[int]
+    // MCell's `HI`: 0 for two states, or the number of states.
+    history: int
+    // The sums a live cell survives on and a dead one is born on, ascending, each once.
+    survive: Buf[int]
+    birth: Buf[int]
+
+    states(self) -> int = if self.history > 2 then self.history else 2
+
+    // The rule as MCell writes it: every weight, `HI`, then the survivals and the births.
+    notation(self) -> string
+        var out = ""
+
+        for k in 0..<9
+            out = s"${out}${PLACES[k]}${self.weights[usize(k)]},"
+
+        out = s"${out}HI${self.history}"
+
+        for i in 0..<self.survive.len()
+            out = s"${out},RS${self.survive[i]}"
+
+        for i in 0..<self.birth.len()
+            out = s"${out},RB${self.birth[i]}"
+
+        out
+
+    same(self, other: WeightedRule) -> bool =
+        self.weights == other.weights && self.states() == other.states() && self.survive == other.survive &&
+            self.birth == other.birth
+
+    // What a cell in `state` becomes when the weights of the live cells about it, itself among them,
+    // add up to `sum`; `born` and `kept` say which sums are births and survivals.
+    after(self, state: u8, sum: int, born: Buf[bool], kept: Buf[bool]) -> u8
+        if state == 0 then return if on(born, sum) then 1 else 0
+
+        if state == 1
+            if on(kept, sum) then return 1
+
+            return if self.states() > 2 then 2 else 0
+
+        if int(state) + 1 >= self.states() then 0 else state + 1
+
+    // One generation, read from `now` and written to `next`, a byte per cell, row by row.
+    step(self, now: Buf[u8], next: Buf[u8], width: int, height: int, torus: bool)
+        val born = sums_of(self.birth)
+        val kept = sums_of(self.survive)
+
+        for y in 0..<height
+            for x in 0..<width
+                var sum = 0
+
+                for k in 0..<9
+                    val w = self.weights[usize(k)]
+
+                    if w != 0 && cell_at(now, width, height, torus, x + k % 3 - 1, y + k / 3 - 1) == 1 then sum += w
+
+                val i = usize(y * width + x)
+
+                next[i] = self.after(now[i], sum, born, kept)
+end WeightedRule
+
+// Every sum the weights can make, from -9·256 to 9·256, and whether it is in `sums`.
+private sums_of(sums: Buf[int]) -> Buf[bool]
+    val out: Buf[bool] = buf_filled(usize(18 * MOST_WEIGHT + 1), false)
+
+    for i in 0..<sums.len()
+        out[usize(sums[i] + 9 * MOST_WEIGHT)] = true
+
+    out
+
+private on(table: Buf[bool], sum: int) -> bool = table[usize(sum + 9 * MOST_WEIGHT)]
+
+// Read a Weighted Life rule: keywords and numbers separated by commas, in any order, as MCell reads
+// them. A place not given weighs 0, `HI` not given is 0, and `RS` and `RB` may come any number of times.
+// Letters may be either case.
+parse_weighted(text: string) -> Result[WeightedRule, Diagnostic]
+    var s = scanner_of(text)
+    val weights: Buf[int] = buf_filled(9, 0)
+    // Which places, and `HI` after them, have been given.
+    val given: Buf[bool] = buf_filled(10, false)
+    var history = 0
+    val survive: Buf[int] = buf()
+    val birth: Buf[int] = buf()
+
+    s.skip_blanks()
+
+    loop
+        val at = s.offset
+        val key = keyword(upper(s.peek().unwrap_or(0)), upper(s.peek_at(1).unwrap_or(0)))
+
+        if key < 0
+            return Err(error(Span(at, at + 1), "expected a keyword: NW, NN, NE, WW, ME, EE, SW, SS, SE, HI, RS or RB"))
+
+        s.bump()
+        s.bump()
+
+        val (n, n_at) = signed(&s)?
+
+        if key < 10
+            if given[usize(key)] then return Err(error(Span(at, n_at.end), s"${text[at..<at + 2]} is given twice"))
+
+            given[usize(key)] = true
+
+        if key < 9
+            if n < -MOST_WEIGHT || n > MOST_WEIGHT then return Err(error(n_at, s"a weight is -${MOST_WEIGHT} to ${MOST_WEIGHT}"))
+
+            weights[usize(key)] = n
+        elif key == 9
+            if n == 1 || n < 0 || n > 256 then return Err(error(n_at, "`HI` is 0 for no history, or the number of states, 2 to 256"))
+
+            history = n
+        else
+            if n < -MOST_SUM || n > MOST_SUM then return Err(error(n_at, s"a sum is -${MOST_SUM} to ${MOST_SUM}"))
+
+            insert(if key == 10 then survive else birth, n)
+
+        s.skip_blanks()
+
+        if s.at_end() then break
+
+        comma(&s)?
+        s.skip_blanks()
+
+    Ok(WeightedRule(weights, history, survive, birth))
+end parse_weighted
+
+// Which keyword the letters `a` and `b` are: a place's index in `PLACES`, 9 for `HI`, 10 for `RS`, 11
+// for `RB`, or -1.
+private keyword(a: u8, b: u8) -> int
+    for k in 0..<9
+        val p = PLACES[k].bytes
+
+        if p[0] == a && p[1] == b then return k
+
+    if a == u8('H') && b == u8('I') then return 9
+
+    if a == u8('R') && b == u8('S') then return 10
+
+    if a == u8('R') && b == u8('B') then return 11
+
+    -1
+
+// Does `text` start with a Weighted Life keyword, so that it is one of its rules?
+weighted_keyword_at(text: string) -> bool
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+    keyword(upper(s.peek().unwrap_or(0)), upper(s.peek_at(1).unwrap_or(0))) >= 0
+
+// A decimal number with an optional `-` in front.
+private signed(s: *Scanner) -> Result[(int, Span), Diagnostic]
+    val start = s.offset
+    val minus = s.accept(u8('-'))
+    val (n, at) = number(s)?
+
+    Ok((if minus then -n else n, Span(start, at.end)))
+
+// Put `n` into the ascending list `into`, unless it is there already.
+private insert(into: Buf[int], n: int)
+    var i = usize(0)
+
+    while i < into.len() && into[i] < n
+        i += 1
+
+    if i < into.len() && into[i] == n then return
+
+    into.push(n)
+
+    var j = into.len() - 1
+
+    while j > i
+        into[j] = into[j - 1]
+        j -= 1
+
+    into[i] = n
+
+// -- Margolus ----------------------------------------------------------------------------------------
+
+// A Margolus rule of MCell's one-bit `MS` kind. A block of 2×2 cells is a number from 0 to 15: bit 0
+// is its north-west cell, bit 1 the north-east, bit 2 the south-west and bit 3 the south-east, as
+// MCell numbers them; `next[b]` is the block that block `b` becomes.
+struct MargolusRule
+    next: Buf[u8]
+
+    notation(self) -> string
+        var out = "MS,D"
+
+        for b in 0..<16
+            out = if b == 0 then s"${out}${self.next[usize(b)]}" else s"${out};${self.next[usize(b)]}"
+
+        out
+
+    same(self, other: MargolusRule) -> bool = self.next == other.next
+
+    // The rule that undoes this one, when every block becomes a different block; none otherwise. Run
+    // with the partitions in the reverse order, it takes a grid back to where it was.
+    inverse(self) -> Option[MargolusRule]
+        val back: Buf[u8] = buf_filled(16, 16)
+
+        for b in 0..<16
+            val to = usize(self.next[usize(b)])
+
+            if back[to] != 16 then return None
+
+            back[to] = u8(b)
+
+        Some(MargolusRule(back))
+
+    // One generation under partition `phase`, read from `now` and written to `next`. A block whose
+    // cells are not four different cells of the grid — at a bounded grid's edge, or across a torus of
+    // odd width or height — is left as it is, and so is every cell's state above 1 outside the blocks;
+    // inside one, a cell in any state but 0 is live.
+    step(self, now: Buf[u8], next: Buf[u8], width: int, height: int, torus: bool, phase: int)
+        for i in 0..<usize(width * height)
+            next[i] = now[i]
+
+        var y = phase
+
+        while y < height
+            val y2 = partner(y, height, torus)
+            var x = phase
+
+            while y2 >= 0 && x < width
+                val x2 = partner(x, width, torus)
+
+                if x2 >= 0
+                    val at = [usize(y * width + x), usize(y * width + x2), usize(y2 * width + x), usize(y2 * width + x2)]
+                    var block = 0
+
+                    for k in 0..<4
+                        if now[at[k]] != 0 then block |= 1 << k
+
+                    val out = int(self.next[usize(block)])
+
+                    for k in 0..<4
+                        next[at[k]] = u8((out >> k) & 1)
+
+                x += 2
+
+            y += 2
+    end step
+end MargolusRule
+
+// The row or column after `x` in a block starting at `x`, along a side of `n` cells; -1 when there is
+// none, past a bounded edge or where wrapping would land on a block already cut.
+private partner(x: int, n: int, torus: bool) -> int =
+    if x + 1 < n then x + 1 elif torus && n % 2 == 0 then 0 else -1
+
+// Read a Margolus rule in MCell's notation, `MS,D` and the sixteen blocks the blocks 0 to 15 become,
+// separated by `;`. Blanks may come between them, as MCell's own lists have them.
+parse_margolus(text: string) -> Result[MargolusRule, Diagnostic]
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+    letter(&s, u8('M'))?
+
+    if upper(s.peek().unwrap_or(0)) != u8('S')
+        return Err(error(s.here(), "expected `S`: MCell's `MS`, one bit a cell, is the Margolus kind read here"))
+
+    s.bump()
+    comma(&s)?
+    letter(&s, u8('D'))?
+
+    val next: Buf[u8] = buf()
+
+    for b in 0..<16
+        s.skip_blanks()
+
+        if b > 0 && !s.accept(u8(';'))
+            return Err(error(s.here(), s"expected `;` and what block ${b} becomes: a rule gives all 16 blocks"))
+
+        s.skip_blanks()
+
+        val (n, at) = number(&s)?
+
+        if n > 15 then return Err(error(at, "a block is a number from 0 to 15"))
+
+        next.push(u8(n))
+
+    s.skip_blanks()
+
+    if s.peek() == Some(u8(';')) then return Err(error(s.here(), "a rule gives 16 blocks, and this gives more"))
+
+    end_of(&s, text)?
+    Ok(MargolusRule(next))
+end parse_margolus
+
+// -- shared ------------------------------------------------------------------------------------------
+
+// The state of the cell at `x`, `y` of a grid held a byte per cell: wrapped on a torus, 0 beyond a
+// bounded grid's edge.
+cell_at(now: Buf[u8], width: int, height: int, torus: bool, x: int, y: int) -> u8
+    if x >= 0 && x < width && y >= 0 && y < height then return now[usize(y * width + x)]
+
+    if !torus then return 0
+
+    now[usize(wrap(y, height) * width + wrap(x, width))]
+
+private abs(n: int) -> int = if n < 0 then -n else n

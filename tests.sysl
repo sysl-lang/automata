@@ -85,7 +85,7 @@ rule_errors()
         ("X3/S23", "expected a rule", 0),
         ("B3/S23V", "unexpected text", 6),
         ("B3/23", "expected `S`", 3),
-        ("23", "expected `/`", 2),
+        ("23 3", "unexpected text", 3),
     ]
 
     for i in 0..<cases.len

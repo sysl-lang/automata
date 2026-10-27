@@ -2,7 +2,8 @@
 
 Cellular automata in [sysl](https://github.com/sysl-lang/sysl): a bit-packed grid that steps
 64 cells per machine word, any rule written in B/S, Hensel, Generations or Larger than Life notation,
-Wolfram's elementary rules, Golly rule tables, RLE patterns, and a
+Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life and Margolus rules, Golly
+rule tables, RLE and MCell patterns, and a
 [syslUI](https://github.com/sysl-lang/syslui) viewer.
 
 ![The Gosper glider gun after 60 generations](shot.png)
@@ -144,6 +145,48 @@ Golly's formulas at ranges 1 to 9; step every shape against a cell-by-cell oracl
 against the oracle at 3, 7 and 256 states; step Life written as Larger than Life against B3/S23 bit for
 bit; and run Bosco's bug through its 166-generation period, oracle and all, back to its own shape.
 
+## MCell's families
+
+```
+sysl run . -- --rule R1/T3/C3/NM
+sysl run . -- --pattern patterns/bbm.mcl
+sysl run . -- --pattern patterns/critters.mcl
+```
+
+Four of the rule families in Mirek Wójtowicz's [MCell](http://www.mirekw.com/ca/) are read in MCell's
+own notation, wherever a rule is read:
+
+- **Cyclic** (`R1/T3/C3/NM`, Griffeath's spirals; `R1/T1/C14/NN`): range 1 to 10, threshold, 2 to
+  256 colours, and `NM` for Moore's square or `NN` for von Neumann's diamond. A cell moves on to the
+  next colour, the last to 0, when at least the threshold of its neighbours already have it. With
+  `/GH` after it (`R3/T5/C8/NM/GH`) it is Greenberg and Hastings' excitable medium: a resting cell is
+  excited by that many excited neighbours, and every other colour moves on regardless. The colours
+  are counted cell by cell, or for a large range colour by colour with Larger than Life's prefix sums.
+  `r` in the viewer fills the board with every colour.
+- **Vote for Life** (`46789`, `13579`): digits with no `/`, the counts of live cells among the nine — a
+  cell and its neighbours — that make a cell live. Each is the B/S rule it amounts to (`46789` is
+  B4678/S35678) and runs on the word-at-a-time step.
+- **Weighted Life** (`NW1,NN2,NE1,WW1,ME0,EE1,SW1,SS1,SE1,HI0,RS2,RS3,RB3`): a weight from -256 to 256
+  for each neighbour and the cell itself, the sums of live weights a live cell survives on (`RS`) and
+  a dead one is born on (`RB`), and `HI`, the number of states when a failed live cell decays through
+  them as in Generations, or 0. Keywords come in any order, and a place not given weighs 0.
+- **Margolus** (`MS,D0;8;4;3;2;5;9;7;1;6;10;11;12;13;14;15`, the Billiard Ball Machine): the grid
+  cut into 2×2 blocks whose corners are on even coordinates one generation and odd ones the next,
+  each block — 1, 2, 4, 8 for its cells from the north-west across and down — replaced by the block
+  the sixteen numbers name. A block that would run off a bounded grid or across a torus of odd size is
+  left as it is.
+
+`--pattern` reads MCell's `.mcl` files for these families and for Life, Generations and Larger than
+Life: `#GAME` and `#RULE` (split over as many lines as it takes) give the rule, `#BOARD` and `#WRAP`
+the board unless `--size` and `--bounded` say otherwise, `#L` lines the cells (`.`, `A`–`X`, and `a`–`j`
+in front for states above 24), and the first `#D` line the name. `patterns/` holds the Billiard Ball
+Machine, Critters and Tron (the "trip-a-tron"), from *Cellular Automata Machines*. The tests step
+every family against a cell-by-cell oracle written from MCell's description, on both edges and on
+grids as small as one cell; Vote for Life and Weighted Life against the B/S rules they are; each
+reversible Margolus rule thirteen steps forward and back again under its inverse; and MCell's own
+example file. MCell's one-dimensional, Neumann binary, general binary and rule-table families are
+not read.
+
 ## Rule files
 
 ```
@@ -205,7 +248,7 @@ acorn, Gosper glider gun and pulsar; two Brian's Brain spaceships head on (`/2/3
 | space | run / pause |
 | `n` | one generation |
 | `+` / `-` | faster / slower |
-| `r` / `c` | random fill / clear |
+| `r` / `c` | random fill (every colour under a cyclic rule) / clear |
 | `t` | torus / bounded |
 | `1`–`4` | Life, HighLife, Seeds, Day & Night |
 | `5`–`9` | the first five bundled patterns |

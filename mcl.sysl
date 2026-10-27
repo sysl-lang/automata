@@ -1,0 +1,250 @@
+// MCell's pattern files, `.mcl`, for the rule families this program runs.
+//
+//     #MCell 4.00
+//     #GAME Cyclic CA
+//     #RULE R1/T3/C3/NM
+//     #BOARD 300x300
+//     #WRAP 1
+//     #D A description line.
+//     #L ..DE.DED$.CE.E.DD$BDBABBC$3.3A
+//
+// Every line begins with `#` and a keyword. `#GAME` names the family (Life when there is none), and
+// `#RULE` the rule in that family's notation (`23/3` when there is none), a long one split over as many
+// `#RULE` lines as it takes. `#BOARD` and `#WRAP` say the board's size and whether its edges wrap. `#L`
+// lines are the cells, run-length encoded as RLE is: `.` is state 0, `A` to `X` are states 1 to 24,
+// and a letter from `a` to `j` in front adds 24 for `a`, 48 for `b`, … 240 for `j`; `$` ends a row,
+// and any of them may have a count in front. The first `#D` line names the pattern. MCell's other
+// keywords — speed, colours, palette, diversities — say how MCell shows a pattern, and are skipped.
+
+import sh.sysl.parsing.{Diagnostic, Span, error, scanner_of}
+import sysl.buf.{Buf, buf}
+import sysl.math.max
+import sysl.seq.Sequence
+
+// The families MCell names in `#GAME` that this runs, and those it does not.
+private val RUN = ["Life", "Generations", "Vote for Life", "Cyclic CA", "Weighted Life", "Margolus", "Larger than Life"]
+private val NOT_RUN = ["Rules table", "1-D totalistic", "1-D binary", "Neumann binary", "General binary", "User DLL", "Special rules"]
+
+// Read an MCell pattern. A refusal is a diagnostic whose span points into `text`.
+parse_mcl(text: string) -> Result[Pattern, Diagnostic]
+    var s = scanner_of(text)
+
+    s.skip_space()
+
+    if !s.accept_seq("#MCell".bytes) then return Err(error(s.here(), "an MCell pattern begins with `#MCell`"))
+
+    s.skip_to_line_end()
+
+    var name = ""
+    var game = "Life"
+    var game_at = Span(0, 0)
+    // The `#RULE` lines joined, and for each piece where it starts in `rule` and in `text`.
+    var rule = ""
+    val pieces: Buf[(usize, usize)] = buf()
+    var board: Option[(int, int)] = None
+    var wrap: Option[bool] = None
+    var cells = Cells(buf(), 0, 0, 0, 0)
+
+    loop
+        s.skip_space()
+
+        if s.at_end() then break
+
+        val line = s.offset
+
+        if !s.accept(u8('#')) then return Err(error(Span(line, line + 1), "every line of an MCell pattern begins with `#`"))
+
+        while s.peek().map(c -> c.is_alpha()).unwrap_or(false)
+            s.bump()
+
+        val key = text[line + 1..<s.offset]
+
+        s.skip_blanks()
+
+        val m = s.offset
+
+        s.skip_to_line_end()
+
+        val value = text[m..<s.offset].trim()
+        val at = Span(m, m + value.len)
+
+        if key == "GAME"
+            game = value
+            game_at = at
+        elif key == "RULE"
+            pieces.push((rule.len, m))
+            rule = s"${rule}${value}"
+        elif key == "BOARD"
+            board = Some(board_of(value).ok_or(error(at, "expected the board's size, such as 300x300"))?)
+        elif key == "WRAP"
+            if value != "0" && value != "1" then return Err(error(at, "`#WRAP` is 1 for edges that wrap or 0 for edges that do not"))
+
+            wrap = Some(value == "1")
+        elif key == "L"
+            cells.read(text, m, m + value.len)?
+        elif key == "D" && name == ""
+            name = value
+
+    if rule == ""
+        rule = "23/3"
+        pieces.push((0, game_at.start))
+
+    for other in NOT_RUN
+        if same_words(game, other) then return Err(error(game_at, s"MCell's ${other} rules are not run here"))
+
+    if !RUN[..].any(known -> same_words(game, known)) then return Err(error(game_at, s"`${game}` is not a family MCell names"))
+
+    val r = rule_of(game, rule).map_err(d -> placed(d, pieces))?
+
+    if int(cells.most()) >= r.states()
+        return Err(error(game_at, s"the pattern has cells in state ${cells.most()}, and ${r.notation()}'s states are 0 to ${r.states() - 1}"))
+
+    Ok(Pattern(name, cells.width, cells.height, Some(r), "", cells.live, board, wrap))
+end parse_mcl
+
+// The rule `text` in the notation of the family `game` names, which is one in `RUN`. A refusal points
+// into `text`.
+private rule_of(game: string, text: string) -> Result[Rule, Diagnostic]
+    if same_words(game, "Life")
+        val r = parse_rule(text)?
+
+        if r is LifeLike(_, _) then return Ok(r)
+
+        if r is Isotropic(_) then return Ok(r)
+
+        return Err(error(Span(0, text.len), "a Life rule is survivals and births, such as 23/3"))
+
+    if same_words(game, "Generations")
+        val r = parse_rule(text)?
+
+        if r is Generations(_) then return Ok(r)
+
+        return Err(error(Span(0, text.len), "a Generations rule is survivals, births and states, such as 345/2/4"))
+
+    if same_words(game, "Vote for Life") then return parse_vote(text).map(v -> Vote(v))
+
+    if same_words(game, "Cyclic CA") then return parse_cyclic(text).map(c -> Cyclic(c))
+
+    if same_words(game, "Weighted Life") then return parse_weighted(text).map(w -> Weighted(w))
+
+    if same_words(game, "Margolus") then return parse_margolus(text).map(m -> Margolus(m))
+
+    if same_words(game, "Larger than Life") then return parse_ltl(text).map(l -> LargerThanLife(l))
+
+    panic(s"`${game}` is not in RUN")
+
+// A diagnostic about the joined `#RULE` text, moved to where the piece it points into sits in the file.
+private placed(d: Diagnostic, pieces: Buf[(usize, usize)]) -> Diagnostic
+    var k = usize(0)
+
+    while k + 1 < pieces.len() && pieces[k + 1].0 <= d.span.start
+        k += 1
+
+    val by = pieces[k].1 - pieces[k].0
+
+    Diagnostic(d.severity, Span(d.span.start + by, d.span.end + by), d.message, d.label, d.note)
+
+// `300x300`.
+private board_of(text: string) -> Option[(int, int)]
+    val at = text.index_of("x")?
+    val w = whole(text[0..<at])?
+    val h = whole(text[at + 1..<text.len])?
+
+    if w < 1 || h < 1 || w > 8192 || h > 8192 then None else Some((w, h))
+
+// A run of decimal digits and nothing else.
+private whole(text: string) -> Option[int]
+    if text.len == 0 || text.len > 6 then return None
+
+    var n = 0
+
+    for c in text.bytes
+        if !c.is_digit() then return None
+
+        n = n * 10 + int(c - u8('0'))
+
+    Some(n)
+
+// Two names alike but for the case of their letters.
+private same_words(a: string, b: string) -> bool
+    if a.len != b.len then return false
+
+    for i in 0..<a.len
+        if a.bytes[i].to_lower() != b.bytes[i].to_lower() then return false
+
+    true
+
+// The cells of the `#L` lines, read a line at a time, the place the next run starts carried between
+// them.
+private struct Cells
+    live: Buf[Cell]
+    x: int
+    y: int
+    width: int
+    height: int
+
+    // The highest state any cell is in.
+    most(self) -> u8
+        var most: u8 = 0
+
+        for i in 0..<self.live.len()
+            most = max(most, self.live[i].state)
+
+        most
+
+    // The runs in `text[from..<to]`.
+    read(*self, text: string, from: usize, to: usize) -> Result[unit, Diagnostic]
+        val b = text.bytes
+        var i = from
+
+        while i < to
+            val start = i
+            var n = 0
+
+            while i < to && b[i].is_digit() && n <= 1_000_000
+                n = n * 10 + int(b[i] - u8('0'))
+                i += 1
+
+            if i == to then return Err(error(Span(start, to), "a count needs a cell or `$` after it"))
+
+            if i > start && n == 0 then return Err(error(Span(start, i), "a run count must be at least 1"))
+
+            val count = if i > start then n else 1
+            val c = b[i]
+            var state = 0
+
+            if c == u8('$')
+                self.x = 0
+                self.y += count
+            elif c == u8('.')
+                self.x += count
+            elif c >= u8('A') && c <= u8('X')
+                state = int(c - u8('A')) + 1
+            elif c >= u8('a') && c <= u8('j')
+                val letter = if i + 1 < to then b[i + 1] else 0
+
+                state = 24 * int(c - u8('a') + 1) + int(letter - u8('A')) + 1
+
+                if letter < u8('A') || letter > u8('X') || state > 255
+                    return Err(error(Span(i, i + 2), s"`${char(c)}` adds to a state from `A` to `X` after it, up to state 255"))
+
+                i += 1
+            elif c.is_blank() && i == start
+                i += 1
+                continue
+            else
+                return Err(error(Span(i, i + 1), s"`${char(c)}` is not a cell (`.`, `A`…`X`, `aA`…`jO`) or `$$`"))
+
+            if state > 0
+                for k in 0..<count
+                    self.live.push(Cell(self.x + k, self.y, u8(state)))
+
+                self.x += count
+                self.height = max(self.height, self.y + 1)
+
+            self.width = max(self.width, self.x)
+            i += 1
+
+        Ok(())
+    end read
+end Cells

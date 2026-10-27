@@ -144,7 +144,7 @@ impl View for Board
         // A rule table gives state 0 a colour of its own, which the whole grid is laid in first.
         m.rule match
             Table(t) -> c.fill(Rect(int(left), int(top), int(z * real(g.width)), int(z * real(g.height))), t.colours[0])
-            LifeLike(_, _) | Isotropic(_) | Generations(_) | Wolfram(_) | LargerThanLife(_) -> ()
+            _ -> ()
 
         // Only the rows and columns that land inside the board are looked at.
         val y0 = max(0, int(((real(r.y) - top) / z).floor()))
@@ -202,14 +202,26 @@ impl View for Board
     end paint
 
 // The colour a cell in `state` is drawn in: a table's own colours, or the one colour of a live cell,
-// which a Generations rule's dying states and a Larger than Life rule's decaying ones fade from
-// toward the board's.
+// which the dying states of a Generations rule, and the decaying ones of Larger than Life and Weighted
+// Life, fade from toward the board's. A cyclic rule's states go round a colour wheel.
 private colour_of(rule: Rule, state: u8) -> u32 =
     rule match
         Table(t) -> t.colours[usize(state)]
         Generations(g) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, g.states - 1)
         LargerThanLife(l) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, l.states - 1)
-        LifeLike(_, _) | Isotropic(_) | Wolfram(_) -> LIVE
+        Weighted(w) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, w.states() - 1)
+        Cyclic(c) -> wheel(int(state), c.states)
+        LifeLike(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> LIVE
+
+// Colour `k` of `n` round a wheel of five hues that starts and ends at the live colour. State 0 is not
+// drawn, and shows the board.
+private wheel(k: int, n: int) -> u32
+    val stops = [LIVE, 0x6FA8DC, 0xB48EAD, 0xE06C75, 0xE5C07B, LIVE]
+    // Where `k` falls along the five stretches between the stops, in 64ths of a stretch.
+    val at = k * 5 * 64 / n
+    val i = at / 64
+
+    mix(stops[usize(i)], stops[usize(i + 1)], at % 64, 64)
 
 // What a frame does on its own: run as many generations as the speed owes.
 tick(m: &Model, dt: real)
@@ -259,7 +271,9 @@ shortcut(m: &Model, e: Event) -> bool
         m.speed = max(0, m.speed - 1)
         m.touched()
     elif key == SCANCODE_R
-        m.grid.randomize(&m.random, 30)
+        // A cyclic rule starts from every colour at once, as MCell's cyclic rules want.
+        if m.rule is Cyclic(c) then m.grid.randomize_states(&m.random, c.states) else m.grid.randomize(&m.random, 30)
+
         m.generation.set(0)
     elif key == SCANCODE_C
         m.grid.clear()

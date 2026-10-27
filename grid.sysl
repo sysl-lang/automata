@@ -43,6 +43,9 @@ struct Grid
     fresh: bool
     // Under a Wolfram rule, the row holding the line's latest generation; -1 until a step finds it.
     front: int
+    // Under a Margolus rule, which partition the next step cuts the grid into: 0 puts the blocks'
+    // corners on even coordinates, 1 on odd ones. Each step flips it.
+    phase: int
 
     // Is the cell at `x`, `y` alive — in any state but 0? Coordinates outside the grid wrap on a
     // torus and are dead when bounded.
@@ -88,6 +91,7 @@ struct Grid
 
         self.fresh = false
         self.front = -1
+        self.phase = 0
 
     // How many cells are alive.
     population(self) -> int
@@ -105,6 +109,15 @@ struct Grid
         for y in 0..<self.height
             for x in 0..<self.width
                 if int(g.below(100)) < percent then self.set(x, y, true)
+
+    // Every cell in one of the states `0..<states`, each as likely as the rest: the soup a cyclic rule
+    // starts from.
+    randomize_states(*self, g: *Rng, states: int)
+        self.clear()
+
+        for y in 0..<self.height
+            for x in 0..<self.width
+                self.set_state(x, y, u8(g.below(u64(states))))
 
     // Do the two grids hold the same cells? Their shapes must agree as well.
     same_cells(self, other: Grid) -> bool
@@ -144,6 +157,24 @@ struct Grid
                 self.keep_states()
                 l.step(self.states, self.spare_states, self.width, self.height, self.edges == Torus)
                 self.swap_states()
+            Vote(counts) ->
+                val (b, s) = vote_life(counts)
+
+                self.step_life_like(b, s)
+                self.fresh = false
+            Cyclic(c) ->
+                self.keep_states()
+                c.step(self.states, self.spare_states, self.width, self.height, self.edges == Torus)
+                self.swap_states()
+            Weighted(w) ->
+                self.keep_states()
+                w.step(self.states, self.spare_states, self.width, self.height, self.edges == Torus)
+                self.swap_states()
+            Margolus(m) ->
+                self.keep_states()
+                m.step(self.states, self.spare_states, self.width, self.height, self.edges == Torus, self.phase)
+                self.swap_states()
+                self.phase = 1 - self.phase
             Wolfram(_) -> ()
 
     // One generation under a rule table: a cell's state and its neighbours' make an index, and the
@@ -471,7 +502,7 @@ grid(width: int, height: int, edges: Edges) -> Grid
     val cells = usize(width * height)
 
     Grid(width, height, edges, stride, buf_filled(words, 0), buf_filled(words, 0), buf_filled(cells, 0),
-         buf_filled(cells, 0), false, -1)
+         buf_filled(cells, 0), false, -1, 0)
 
 // `x` reduced into `0..<n`, for a negative `x` as well.
 wrap(x: int, n: int) -> int = ((x % n) + n) % n
