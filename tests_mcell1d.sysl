@@ -1,0 +1,425 @@
+@tests
+
+// MCell's 1-D binary and 1-D totalistic families, checked against what they did not compute
+// themselves: Wolfram's elementary rules, which 1-D binary at range 1 is; steps worked out by hand;
+// a sum-and-lookup step written the obvious way from MCell's description; Pascal's triangle; and
+// MCell's own example rules in pattern files.
+
+import sysl.buf.{Buf, buf, buf_filled}
+import sysl.rand.{Rng, rng}
+import sysl.text.{from_utf8, repeat}
+
+private val PASCAL_FILE = from_utf8(embed("patterns/pascal.mcl")).unwrap()
+private val KITES_FILE = from_utf8(embed("patterns/kites.mcl")).unwrap()
+
+private val WIDTHS = [1, 3, 5, 63, 64, 65, 130]
+
+private rule(text: string) -> Rule = parse_rule(text).unwrap()
+
+private refuses(cases: [](string, string, int))
+    for (text, says, at) in cases
+        val d = parse_rule(text).unwrap_err()
+
+        assert(d.message.contains(says), s"${text}: ${d.message}")
+        assert_eq(d.span.start, usize(at), text)
+
+// A grid of `width` cells across holding `line` in its top row, every other row empty.
+private line_grid(line: string, height: int, edges: Edges) -> Grid
+    var g = grid(int(line.len), height, edges)
+
+    for x in 0..<int(line.len)
+        g.set_state(x, 0, line.bytes[usize(x)] - u8('0'))
+
+    g
+
+// Row `y`'s states as digits, west first.
+private row_of(g: Grid, y: int) -> string
+    var out = ""
+
+    for x in 0..<g.width
+        out = s"${out}${g.state(x, y)}"
+
+    out
+
+// One step of `line` under the rule, read off the grid's next row.
+private stepped(rule_text: string, line: string, edges: Edges) -> string
+    var g = line_grid(line, 2, edges)
+
+    g.step(rule(rule_text))
+    row_of(g, 1)
+
+// -- notation ----------------------------------------------------------------------------------------
+
+@test("a 1-D binary rule reads back to MCell's spelling: capital digits, no leading zeros, H only with history")
+mcell1d_binary_notation()
+    val widest = s"R4,W${repeat("F", 127)}E"
+
+    for text in ["R1,W6E", "R1,W1E", "R1,W0", "R2,WBF8A5CD8", "R2,WBF8A18C8,H5", "R3,W1", widest]
+        assert_eq(rule(text).notation(), text)
+        assert(rule(rule(text).notation()).same(rule(text)))
+
+    assert_eq(rule("r2,wbf8a5cd8,h3").notation(), "R2,WBF8A5CD8,H3")
+    assert_eq(rule("R1,W001E").notation(), "R1,W1E")
+    // `H` below 3 is no history, as MCell has it.
+    assert_eq(rule("R1,W6E,H2").notation(), "R1,W6E")
+    assert(rule("R1,W6E,H0").same(rule("R1,W6E")))
+    assert(!rule("R1,W6E").same(rule("R1,W6E,H3")))
+    assert(!rule("R1,W6E").same(rule("R2,W6E")))
+    assert(!rule("R1,W6E").same(rule("W110")))
+    assert_eq(rule("R2,WBF8A18C8,H5").states(), 5)
+    assert_eq(rule("R2,WBF8A18C8").states(), 2)
+
+@test("a 1-D totalistic rule reads back to MCell's spelling, totals ascending each with its letter")
+mcell1d_totalistic_notation()
+    for text in ["R3,C0,M1,S3,S6,S7,B0,B1", "R1,C0,M1,B1", "R10,C256,M0,S20,B0", "R2,C4,M0,S1,S2,B2", "R1,C2,M1"]
+        assert_eq(rule(text).notation(), text)
+        assert(rule(rule(text).notation()).same(rule(text)))
+
+    // Totals in any order and given twice are one set; letters in either case.
+    assert_eq(rule("r1,c0,m1,b1,s2,S0,B1").notation(), "R1,C0,M1,S0,S2,B1")
+    // `C` is written as given, and below 3 it is two states either way.
+    assert(rule("R1,C0,M1,B1").same(rule("R1,C2,M1,B1")))
+    assert(!rule("R1,C0,M1,B1").same(rule("R1,C3,M1,B1")))
+    assert(!rule("R1,C0,M1,S1").same(rule("R1,C0,M0,S1")))
+    assert_eq(rule("R3,C5,M1,S3,B1").states(), 5)
+    assert_eq(rule("R3,C1,M1,S3,B1").states(), 2)
+
+@test("Larger than Life, cyclic and Weighted Life rules are still read as themselves beside the 1-D ones")
+mcell1d_dispatch()
+    assert(rule("R5,C0,M1,S34..58,B34..45,NM") is LargerThanLife(_))
+    assert(rule("R1/T3/C3/NM") is Cyclic(_))
+    assert(rule("RS2,RB3,ME0") is Weighted(_))
+    assert(rule("R1,W6E") is BinaryLine(_))
+    assert(rule("R1,C0,M1,B1") is TotalisticLine(_))
+
+@test("a 1-D rule outside MCell's bounds or off its notation is refused, pointing at the culprit")
+mcell1d_errors()
+    refuses([
+        ("R0,W6E", "range is 1 to 4", 1),
+        ("R5,W6E", "range is 1 to 4", 1),
+        ("R1,W1FF", "at most 2 hexadecimal digits", 4),
+        ("R2,W1BF8A5CD8", "at most 8 hexadecimal digits", 4),
+        ("R1,W", "expected the rule in hexadecimal", 4),
+        ("R1,W6G", "unexpected text", 5),
+        ("R1,W6E,X3", "expected `H`", 7),
+        ("R1,W6E,H26", "0 to 25", 8),
+        ("R1,W6E,H", "expected a number", 8),
+        ("R0,C0,M1,B1", "range is 1 to 10", 1),
+        ("R11,C0,M1,B1", "range is 1 to 10", 1),
+        ("R1,C257,M1,B1", "0 to 256", 4),
+        ("R1,C0,M2,B1", "`M` is 0 or 1", 7),
+        ("R1,M1,C0,B1", "expected `C`", 3),
+        ("R1,C0,B1", "expected `M`", 6),
+        ("R1,C0,M1,S2,X3", "expected `S` or `B`", 12),
+        ("R1,C0,M1,S2,,B1", "expected `S` or `B`", 12),
+        ("R1,C0,M1,S,B1", "expected a number", 10),
+        ("R1,C0,M1,S2;B1", "expected `,`", 11),
+        ("R1,C0,M1,S2 B1", "expected `,`", 12),
+        // Three cells are counted at range 1 with the middle, two without it.
+        ("R1,C0,M1,S4", "a total is 0 to 3", 10),
+        ("R1,C0,M0,B3", "a total is 0 to 2", 10),
+    ])
+
+    assert(parse_rule("R1,C0,M1,S3").is_ok())
+    assert(parse_rule("R10,C0,M1,B21").is_ok())
+
+// -- 1-D binary --------------------------------------------------------------------------------------
+
+@test("R1,W1E is W30 and R1,W6E is W110: whole grids alike, generation by generation, every width, both edges")
+mcell1d_binary_is_wolfram()
+    var r = rng(41, 3)
+
+    for (mcell, code) in [("R1,W1E", 30), ("R1,W6E", 110), ("R1,W5A", 90), ("R1,W0", 0), ("R1,WFF", 255)]
+        for w in 0..<WIDTHS.len
+            for e in [Torus, Bounded]
+                var a = grid(WIDTHS[w], 6, e)
+                var b = grid(WIDTHS[w], 6, e)
+
+                for x in 0..<WIDTHS[w]
+                    val bit = r.below(2) == 1
+
+                    a.set(x, 0, bit)
+                    b.set(x, 0, bit)
+
+                // Past the grid's height, so the history scrolls as well.
+                for gen in 1..<14
+                    a.step(Wolfram(u8(code)))
+                    b.step(rule(mcell))
+                    assert(a.same_cells(b), s"${mcell}, width ${WIDTHS[w]}, generation ${gen}")
+
+@test("a range-2 step worked by hand: the westernmost cell is the arrangement's highest bit, and the edges matter")
+mcell1d_binary_range_two()
+    // Cells 2 and 4 live. Cell 2 sees 00101, arrangement 5; cell 4 sees 10100, arrangement 20.
+    assert_eq(stepped("R2,W20", "0010100", Bounded), "0010000")
+    assert_eq(stepped("R2,W100000", "0010100", Bounded), "0000100")
+    assert_eq(stepped("R2,W100020", "0010100", Bounded), "0010100")
+    // Cell 3 sees 01010, arrangement 10, and cell 1 sees 00010, arrangement 2.
+    assert_eq(stepped("R2,W404", "0010100", Bounded), "0101000")
+    // On a ring of five, cell 0 sees cells 3, 4, 0, 1, 2: 01100, arrangement 12; bounded it sees 00100.
+    assert_eq(stepped("R2,W1000", "10001", Torus), "10000")
+    assert_eq(stepped("R2,W1000", "10001", Bounded), "00000")
+    assert_eq(stepped("R2,W10", "10001", Bounded), "10001")
+    // Arrangement 0 is bit 0: an odd code turns the empty line on.
+    assert_eq(stepped("R2,W1", "00000", Bounded), "11111")
+
+// One 1-D binary step of `line`, the rule's bit looked up in its hexadecimal digits as written: bit
+// `n` is bit `n % 4` of the digit `n / 4` places from the right.
+private naive_binary(line: Buf[u8], r: int, digits: string, ring: bool) -> Buf[u8]
+    val n = int(line.len())
+    val out: Buf[u8] = buf()
+
+    for x in 0..<n
+        var k = 0
+
+        for d in -r..r
+            var at = x + d
+
+            if ring then at = ((at % n) + n) % n
+
+            k = 2 * k + (if at >= 0 && at < n && line[usize(at)] == 1 then 1 else 0)
+
+        val place = int(digits.len) - 1 - k / 4
+        var on = false
+
+        if place >= 0
+            val c = digits.bytes[usize(place)]
+            val v = if c <= u8('9') then int(c - u8('0')) else int(c - u8('A')) + 10
+
+            on = (v >> (k % 4)) & 1 == 1
+
+        out.push(if on then 1 else 0)
+
+    out
+
+private text_of(line: Buf[u8]) -> string
+    var out = ""
+
+    for i in 0..<line.len()
+        out = s"${out}${line[i]}"
+
+    out
+
+@test("random 1-D binary rules of every range step random lines as a lookup in the written digits does")
+mcell1d_binary_matches_naive()
+    var g = rng(47, 5)
+
+    for trial in 0..<80
+        val r = 1 + trial % 4
+        val most = (1 << (2 * r + 1)) / 4
+        var digits = ""
+
+        for i in 0..<1 + int(g.below(u64(most)))
+            val d = usize(g.below(16))
+
+            digits = s"${digits}${"0123456789ABCDEF"[d..<d + 1]}"
+
+        val ru = rule(s"R${r},W${digits}")
+        val w = WIDTHS[usize(trial) % WIDTHS.len]
+        val e = if trial % 2 == 0 then Torus else Bounded
+        var gl = grid(w, 4, e)
+        var line: Buf[u8] = buf()
+
+        for x in 0..<w
+            val bit = u8(g.below(2))
+
+            line.push(bit)
+            gl.set_state(x, 0, bit)
+
+        for gen in 1..<7
+            gl.step(ru)
+            line = naive_binary(line, r, digits, e == Torus)
+            assert_eq(row_of(gl, if gen < 4 then gen else 3), text_of(line), s"R${r},W${digits}, width ${w}, generation ${gen}")
+end mcell1d_binary_matches_naive
+
+@test("1-D binary with history: a live cell the rule kills decays, counts as dead, and is dead after the last state")
+mcell1d_binary_history()
+    var g = line_grid("111", 4, Bounded)
+    val r = rule("R1,W6E,H3")
+
+    // W110: 011 and 110 stay live, 111 dies, so the middle decays to 2.
+    g.step(r)
+    assert_eq(row_of(g, 1), "121")
+    // The middle is no longer live, so each end sees 010 and stays; state 2 of 3 is the last.
+    g.step(r)
+    assert_eq(row_of(g, 2), "101")
+    // Without history the same cell dies at once.
+    assert_eq(stepped("R1,W6E", "111", Bounded), "101")
+
+// -- 1-D totalistic ----------------------------------------------------------------------------------
+
+// One step of `line` as MCell's page states the rule: the live cells, state 1, within `r` of a cell,
+// itself among them when `middle`; a dead cell is born on a total in `birth`, a live one survives on
+// one in `survive`, and with more than two states a live one that does not survive decays, and a
+// decaying one moves on regardless until it dies.
+private naive_totalistic(line: Buf[u8], r: int, middle: bool, survive: Buf[bool], birth: Buf[bool], states: int, ring: bool) -> Buf[u8]
+    val n = int(line.len())
+    val out: Buf[u8] = buf()
+
+    for x in 0..<n
+        var total = 0
+
+        for d in -r..r
+            var at = x + d
+
+            if ring then at = ((at % n) + n) % n
+
+            if (d != 0 || middle) && at >= 0 && at < n && line[usize(at)] == 1 then total += 1
+
+        val s = line[usize(x)]
+        var next = 0
+
+        if s == 0
+            next = if birth[usize(total)] then 1 else 0
+        elif s == 1
+            next = if survive[usize(total)] then 1 elif states > 2 then 2 else 0
+        elif int(s) + 1 < states
+            next = int(s) + 1
+
+        out.push(u8(next))
+
+    out
+end naive_totalistic
+
+@test("random 1-D totalistic rules step random lines as the sum-and-lookup oracle does, every range, both edges")
+mcell1d_totalistic_matches_naive()
+    var g = rng(53, 9)
+
+    for trial in 0..<120
+        val r = 1 + int(g.below(10))
+        val middle = g.below(2) == 1
+        val most = 2 * r + (if middle then 1 else 0)
+        val states = if trial % 3 == 0 then 2 + int(g.below(6)) else int(g.below(3))
+        val survive: Buf[bool] = buf()
+        val birth: Buf[bool] = buf()
+        var text = s"R${r},C${states},M${if middle then 1 else 0}"
+
+        for n in 0..most
+            survive.push(g.below(3) == 0)
+            birth.push(g.below(4) == 0)
+
+            if survive[usize(n)] then text = s"${text},S${n}"
+
+            if birth[usize(n)] then text = s"${text},B${n}"
+
+        val ru = rule(text)
+        val w = WIDTHS[usize(trial) % WIDTHS.len]
+        val e = if trial % 2 == 0 then Torus else Bounded
+        var grid_line = grid(w, 5, e)
+        var line: Buf[u8] = buf()
+
+        for x in 0..<w
+            val s = u8(g.below(u64(if states > 2 then states else 2)))
+
+            line.push(s)
+            grid_line.set_state(x, 0, s)
+
+        for gen in 1..<9
+            grid_line.step(ru)
+            line = naive_totalistic(line, r, middle, survive, birth, states, e == Torus)
+            assert_eq(row_of(grid_line, if gen < 5 then gen else 4), text_of(line), s"${text}, width ${w}, generation ${gen}")
+end mcell1d_totalistic_matches_naive
+
+@test("M0 and M1 differ on one line: the middle cell counts toward its own survival")
+mcell1d_totalistic_middle()
+    // Cells 1 and 2 live. Without the middle each has one live neighbour and survives on S1; with it,
+    // each counts two and dies. The dead cells beside them count one either way, and are born on B1.
+    assert_eq(stepped("R1,C0,M0,S1,B1", "01100", Bounded), "11110")
+    assert_eq(stepped("R1,C0,M1,S1,B1", "01100", Bounded), "10010")
+    // A dead cell counts itself as nothing, so births are the same.
+    assert_eq(stepped("R1,C0,M0,B1", "01100", Bounded), stepped("R1,C0,M1,B1", "01100", Bounded))
+
+@test("1-D totalistic decay for C above 2: states climb to the last and die, and a decaying cell neither counts nor is born on")
+mcell1d_totalistic_decay()
+    var g = line_grid("00100", 5, Bounded)
+    val r = rule("R1,C4,M1,B1")
+
+    g.step(r)
+    assert_eq(row_of(g, 1), "01210")
+    g.step(r)
+    assert_eq(row_of(g, 2), "12321")
+    // State 3 of 4 is the last, so the middle dies, whatever is around it.
+    g.step(r)
+    assert_eq(row_of(g, 3), "23032")
+    // The dead cell between a decaying cell and a live one counts one, not two, so B2 passes it by;
+    // between two live ones it is born.
+    assert_eq(stepped("R1,C3,M0,B2", "201", Bounded), "002")
+    assert_eq(stepped("R1,C3,M0,B2", "101", Bounded), "212")
+    // Without history the same cell dies outright.
+    assert_eq(stepped("R1,C2,M1,B1", "00100", Bounded), "01010")
+
+// -- .mcl --------------------------------------------------------------------------------------------
+
+@test("MCell's Pascal's Triangle loads as 1-D totalistic and draws Pascal's triangle mod 2 from the top row")
+mcell1d_mcl_pascal()
+    val p = parse_mcl(PASCAL_FILE).unwrap()
+
+    assert(p.rule.unwrap().same(rule("R1,C0,M1,B1")))
+    assert(p.board == Some((256, 128)))
+    assert(p.wrap == Some(false))
+    assert(p.name.starts_with("Pascal's Triangle"))
+
+    val n = 40
+    var g = grid(2 * n + 1, n, Bounded)
+
+    p.stamp_centred(&g)
+    assert_eq(g.population(), 1)
+    assert(g.get(n, 0))
+
+    for t in 1..<n
+        g.step(p.rule.unwrap())
+
+    for t in 0..<n
+        for j in -n..n
+            // Row `t` holds C(t, (t + j) / 2) at offset `j`, odd exactly when the lower index's bits are
+            // a subset of `t`'s.
+            val k = (t + j) / 2
+            val want = (t + j) % 2 == 0 && k >= 0 && k <= t && (k & t) == k
+
+            assert_eq(g.get(n + j, t), want, s"row ${t}, cell ${j}")
+
+@test("MCell's Kites loads as 1-D binary at range 2, at the top, and steps as its rule does")
+mcell1d_mcl_kites()
+    val p = parse_mcl(KITES_FILE).unwrap()
+    val r = p.rule.unwrap()
+
+    assert(r.same(rule("R2,WBF8A5CD8")))
+    assert(p.wrap == Some(true))
+    assert_eq(p.height, 1)
+
+    var g = grid(96, 40, Torus)
+
+    p.stamp_centred(&g)
+    assert_eq(g.population(), int(p.live.len()))
+
+    var line: Buf[u8] = buf()
+
+    for x in 0..<96
+        line.push(g.state(x, 0))
+
+    // Drawn at the top: every row below it is its future, empty until stepped to.
+    for y in 1..<40
+        assert(!row_of(g, y).contains("1"), s"row ${y}")
+
+    for y in 1..<40
+        g.step(r)
+        line = naive_binary(line, 2, "BF8A5CD8", true)
+        assert_eq(row_of(g, y), text_of(line), s"generation ${y}")
+
+@test("a 1-D .mcl names its family in any case, refuses a rule in the wrong family, and bounds cells by the history")
+mcell1d_mcl_rules()
+    val b = parse_mcl("#MCell 4.00\n#GAME 1-D Binary\n#RULE R1,W6E,H3\n#L AB\n").unwrap()
+
+    assert(b.rule.unwrap().same(rule("R1,W6E,H3")))
+    assert(parse_mcl("#MCell 4.00\n#GAME 1-d totalistic\n#RULE R1,C0,M1,B1\n#L A\n").is_ok())
+    // A rule split over `#RULE` lines is one rule.
+    val split = parse_mcl("#MCell 4.00\n#GAME 1-D totalistic\n#RULE R3,C0,M1,\n#RULE S3,S6,S7,B0,B1\n#L A\n").unwrap()
+
+    assert(split.rule.unwrap().same(rule("R3,C0,M1,S3,S6,S7,B0,B1")))
+
+    val wrong = parse_mcl("#MCell 4.00\n#GAME 1-D binary\n#RULE R1,C0,M1,B1\n#L A\n").unwrap_err()
+
+    assert(wrong.message.contains("expected `W`"), wrong.message)
+
+    val high = parse_mcl("#MCell 4.00\n#GAME 1-D binary\n#RULE R1,W6E\n#L AB\n").unwrap_err()
+
+    assert(high.message.contains("states are 0 to 1"), high.message)

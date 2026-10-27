@@ -483,6 +483,8 @@ private colour_of(rule: Rule, state: u8) -> u32 =
         Generations(g) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, g.states - 1)
         LargerThanLife(l) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, l.states - 1)
         Weighted(w) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, w.states() - 1)
+        BinaryLine(b) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, b.states() - 1)
+        TotalisticLine(t) -> if state <= 1 then LIVE else mix(LIVE, BOARD, int(state) - 1, t.states() - 1)
         Cyclic(c) -> wheel(int(state), c.states)
         LifeLike(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> LIVE
 

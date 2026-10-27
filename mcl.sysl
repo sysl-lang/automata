@@ -22,8 +22,11 @@ import sysl.math.max
 import sysl.seq.Sequence
 
 // The families MCell names in `#GAME` that this runs, and those it does not.
-private val RUN = ["Life", "Generations", "Vote for Life", "Cyclic CA", "Weighted Life", "Margolus", "Larger than Life"]
-private val NOT_RUN = ["Rules table", "1-D totalistic", "1-D binary", "Neumann binary", "General binary", "User DLL", "Special rules"]
+private val RUN = [
+    "Life", "Generations", "Vote for Life", "Cyclic CA", "Weighted Life", "Margolus", "Larger than Life",
+    "1-D totalistic", "1-D binary",
+]
+private val NOT_RUN = ["Rules table", "Neumann binary", "General binary", "User DLL", "Special rules"]
 
 // Read an MCell pattern. A refusal is a diagnostic whose span points into `text`.
 parse_mcl(text: string) -> Result[Pattern, Diagnostic]
@@ -130,6 +133,10 @@ private rule_of(game: string, text: string) -> Result[Rule, Diagnostic]
     if same_words(game, "Margolus") then return parse_margolus(text).map(m -> Margolus(m))
 
     if same_words(game, "Larger than Life") then return parse_ltl(text).map(l -> LargerThanLife(l))
+
+    if same_words(game, "1-D totalistic") then return parse_totalistic_line(text).map(t -> TotalisticLine(t))
+
+    if same_words(game, "1-D binary") then return parse_binary_line(text).map(b -> BinaryLine(b))
 
     panic(s"`${game}` is not in RUN")
 

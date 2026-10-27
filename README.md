@@ -2,8 +2,8 @@
 
 Cellular automata in [sysl](https://github.com/sysl-lang/sysl): a bit-packed grid that steps
 64 cells per machine word, any rule written in B/S, Hensel, Generations or Larger than Life notation,
-Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life and Margolus rules, Golly
-rule tables, RLE and MCell patterns, and a
+Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life, Margolus, 1-D binary and
+1-D totalistic rules, Golly rule tables, RLE and MCell patterns, and a
 [syslUI](https://github.com/sysl-lang/syslui) viewer.
 
 ![The Gosper glider gun after 60 generations](shot.png)
@@ -177,9 +177,11 @@ bit; and run Bosco's bug through its 166-generation period, oracle and all, back
 sysl run . -- --rule R1/T3/C3/NM
 sysl run . -- --pattern patterns/bbm.mcl
 sysl run . -- --pattern patterns/critters.mcl
+sysl run . -- --pattern patterns/kites.mcl
+sysl run . -- --rule R3,C0,M1,S3,S6,S7,B0,B1
 ```
 
-Four of the rule families in Mirek Wójtowicz's [MCell](http://www.mirekw.com/ca/) are read in MCell's
+Six of the rule families in Mirek Wójtowicz's [MCell](http://www.mirekw.com/ca/) are read in MCell's
 own notation, wherever a rule is read:
 
 - **Cyclic** (`R1/T3/C3/NM`, Griffeath's spirals; `R1/T1/C14/NN`): range 1 to 10, threshold, 2 to
@@ -201,17 +203,30 @@ own notation, wherever a rule is read:
   each block — 1, 2, 4, 8 for its cells from the north-west across and down — replaced by the block
   the sixteen numbers name. A block that would run off a bounded grid or across a torus of odd size is
   left as it is.
+- **1-D binary** (`R1,W6E`, `R2,WBF8A5CD8` Kites, `R2,WBF8A18C8,H5`): a range from 1 to 4, and the
+  rule in hexadecimal, a bit for every arrangement of the `2r + 1` cells about a cell, read west to
+  east as a binary number — at range 1 that is Wolfram's code, so `R1,W6E` is W110. An optional `H`
+  above 2 is the number of states: a live cell the rule kills decays through them as in Generations.
+- **1-D totalistic** (`R3,C0,M1,S3,S6,S7,B0,B1` Champagne, `R1,C0,M1,B1` Pascal's triangle): range 1
+  to 10, `C` the number of states (history above 2, as `H` is), `M1` when the cell counts itself,
+  then each total of live cells a live cell survives on (`S`) and a dead one is born on (`B`), each
+  with its own letter, as MCell writes them.
+
+Both 1-D families run as the Wolfram rules do: the grid is the line's history, a generation to a row,
+scrolling once the bottom is reached, and a pattern is drawn at the top. `R`, a range and a comma is
+1-D binary when `W` follows, Larger than Life when the rule has a `..` in it, and 1-D totalistic
+otherwise.
 
 `--pattern` reads MCell's `.mcl` files for these families and for Life, Generations and Larger than
 Life: `#GAME` and `#RULE` (split over as many lines as it takes) give the rule, `#BOARD` and `#WRAP`
 the board unless `--size` and `--bounded` say otherwise, `#L` lines the cells (`.`, `A`–`X`, and `a`–`j`
 in front for states above 24), and the first `#D` line the name. `patterns/` holds the Billiard Ball
-Machine, Critters and Tron (the "trip-a-tron"), from *Cellular Automata Machines*. The tests step
-every family against a cell-by-cell oracle written from MCell's description, on both edges and on
-grids as small as one cell; Vote for Life and Weighted Life against the B/S rules they are; each
+Machine, Critters and Tron (the "trip-a-tron"), from *Cellular Automata Machines*, and MCell's own 1-D
+examples Pascal's Triangle and Kites. The tests step every family against a cell-by-cell oracle
+written from MCell's description, on both edges and on grids as small as one cell; Vote for Life and
+Weighted Life against the B/S rules they are; 1-D binary at range 1 against Wolfram's codes; each
 reversible Margolus rule thirteen steps forward and back again under its inverse; and MCell's own
-example file. MCell's one-dimensional, Neumann binary, general binary and rule-table families are
-not read.
+example file. MCell's Neumann binary, general binary and rule-table families are not read.
 
 ## Rule files
 

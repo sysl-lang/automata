@@ -39,6 +39,11 @@ enum Rule
     // A Margolus rule: 2×2 blocks, each replaced as a table of 16 says, the blocks' corners moving
     // between even and odd coordinates every generation.
     Margolus(rule: MargolusRule)
+    // MCell's 1-D binary rules, Wolfram's codes widened to a range of up to 4; see `mcell1d.sysl`. The
+    // grid holds the line's history as it does a Wolfram rule's.
+    BinaryLine(rule: BinaryLineRule)
+    // MCell's 1-D totalistic rules: a count of live cells within a range of up to 10.
+    TotalisticLine(rule: TotalisticLineRule)
 
     // The rule as a person names it: B/S notation, counts in ascending order, which `parse_rule` reads
     // back to the same rule; Hensel or Larger than Life notation in Golly's canonical spelling;
@@ -56,6 +61,8 @@ enum Rule
             Vote(v) -> vote_notation(v)
             Weighted(w) -> w.notation()
             Margolus(m) -> m.notation()
+            BinaryLine(b) -> b.notation()
+            TotalisticLine(t) -> t.notation()
 
     // How many states a cell may be in under the rule.
     states(self) -> int
@@ -65,6 +72,8 @@ enum Rule
             LargerThanLife(l) -> l.states
             Cyclic(c) -> c.states
             Weighted(w) -> w.states()
+            BinaryLine(b) -> b.states()
+            TotalisticLine(t) -> t.states()
             LifeLike(_, _) | Isotropic(_) | Wolfram(_) | Vote(_) | Margolus(_) -> 2
 
     // Whether two rules make every cell the same: a B/S rule and the Hensel rule naming every
@@ -83,6 +92,8 @@ enum Rule
             (Cyclic(c1), Cyclic(c2)) -> c1.same(c2)
             (Weighted(w1), Weighted(w2)) -> w1.same(w2)
             (Margolus(m1), Margolus(m2)) -> m1.same(m2)
+            (BinaryLine(b1), BinaryLine(b2)) -> b1.same(b2)
+            (TotalisticLine(t1), TotalisticLine(t2)) -> t1.same(t2)
             _ -> false
 end Rule
 
@@ -129,7 +140,8 @@ private two_state(r: Rule) -> Option[(u64, u64)] =
             val (b, s) = vote_life(v)
 
             Some((set_of(b), set_of(s)))
-        Table(_) | Wolfram(_) | LargerThanLife(_) | Cyclic(_) | Weighted(_) | Margolus(_) -> None
+        Table(_) | Wolfram(_) | LargerThanLife(_) | Cyclic(_) | Weighted(_) | Margolus(_) | BinaryLine(_) |
+            TotalisticLine(_) -> None
 
 // The counts a mask holds, as the digits B/S notation writes them in.
 private counts(mask: u16) -> string
@@ -159,12 +171,15 @@ private counts(mask: u16) -> string
 // `345/2/4`, MCell's survivals, births, states). Hensel letters may narrow its counts as anywhere else
 // (`B2-a/S12/C5`). **`W` and a number from 0 to 255 is a Wolfram code** (`W110`).
 //
-// **A rule with a comma in it is Larger than Life** (`R5,C0,M1,S34..58,B34..45,NM`; see `ltl.sysl`),
-// since B/S notation never has one.
+// **MCell's families are told apart by how they begin** (see `mcell.sysl` and `mcell1d.sysl`): a
+// Weighted Life keyword (`NW1,…`, `RS2,…`) is Weighted Life, `MS,D…` is Margolus, `R` and a range
+// followed by `/` is a cyclic rule (`R1/T3/C3/NM`), and digits with no `/` are Vote for Life
+// (`46789`). `R`, a range and `,W` is 1-D binary (`R1,W6E`); `R`, a range and a comma with no `..`
+// anywhere is 1-D totalistic (`R3,C0,M1,S3,S6,S7,B0,B1`), since Larger than Life always writes its
+// counts as ranges.
 //
-// **MCell's families are told apart by how they begin** (see `mcell.sysl`): a Weighted Life keyword
-// (`NW1,…`, `RS2,…`) is Weighted Life, `MS,D…` is Margolus, `R` and a range followed by `/` is a
-// cyclic rule (`R1/T3/C3/NM`), and digits with no `/` are Vote for Life (`46789`).
+// **Any other rule with a comma in it is Larger than Life** (`R5,C0,M1,S34..58,B34..45,NM`; see
+// `ltl.sysl`), since B/S notation never has one.
 //
 // Anything else is refused with a diagnostic pointing at the byte that broke it.
 parse_rule(text: string) -> Result[Rule, Diagnostic]
@@ -181,6 +196,12 @@ parse_rule(text: string) -> Result[Rule, Diagnostic]
     if first == u8('M') || first == u8('m') then return parse_margolus(text).map(m -> Margolus(m))
 
     if cyclic_shaped(&s) then return parse_cyclic(text).map(c -> Cyclic(c))
+
+    val line = line_family(text)
+
+    if line == u8('W') then return parse_binary_line(text).map(b -> BinaryLine(b))
+
+    if line == u8('T') then return parse_totalistic_line(text).map(t -> TotalisticLine(t))
 
     if text.contains(",") || first == u8('R') || first == u8('r') then return parse_ltl(text).map(l -> LargerThanLife(l))
 

@@ -1,0 +1,296 @@
+// MCell's two one-dimensional rule families, each read in MCell's own notation. A line of cells is
+// stepped a generation at a time, and the grid holds the line's history one generation to a row, as
+// it does for Wolfram's elementary rules.
+//
+//   - **1-D binary** (`R1,W6E`, `R2,WBF8A5CD8`, `R2,WBF8A18C8,H5`): a range from 1 to 4, and the rule
+//     as a hexadecimal number with a bit for every arrangement of the `2r + 1` cells of the
+//     neighbourhood. Bit `n` is what a cell becomes where the arrangement, read as a binary number
+//     with the westernmost cell as its highest bit, is `n` — so at range 1 the number is Wolfram's
+//     code, and `R1,W1E` is W30. `H` is optional: the number of states, when it is more than 2.
+//   - **1-D totalistic** (`R3,C0,M1,S3,S6,S7,B0,B1`): a range from 1 to 10, the number of states
+//     (`C`, history when more than 2), whether the middle cell counts (`M1`) or not (`M0`), and each
+//     total of live cells a live cell survives on (`S`) and a dead one is born on (`B`), each written
+//     with its own letter and as many times as there are totals.
+//
+// **With history, a live cell that does not survive is not dead yet**: as in a Generations rule it
+// goes through states 2, 3, … a generation at a time, whatever is around it, and is dead after the
+// last. Only a cell in state 1 counts as live, so a decaying one gives birth to nothing, but it holds
+// its place: nothing is born on it until it has died.
+
+import sysl.buf.Buf
+import sh.sysl.parsing.{Diagnostic, Scanner, Span, error, scanner_of}
+
+// The largest range of each family, as MCell gives them.
+private const MOST_BINARY_RANGE: int = 4
+private const MOST_TOTALISTIC_RANGE: int = 10
+
+// The most states `H` and `C` give, as MCell's page bounds them.
+private const MOST_BINARY_STATES: int = 25
+private const MOST_TOTALISTIC_STATES: int = 256
+
+// -- 1-D binary --------------------------------------------------------------------------------------
+
+// A 1-D binary rule: bit `n` of `code` is what a cell becomes when the cells from `range` west of it
+// to `range` east, read west to east as the bits of a number from the highest, make `n`.
+struct BinaryLineRule
+    range: int
+    code: u512
+    // MCell's `H`: 0 when not given, otherwise the number it was given.
+    history: int
+
+    states(self) -> int = if self.history > 2 then self.history else 2
+
+    // The rule as MCell writes it: the range, the code in capital hexadecimal digits with no leading
+    // zeros, and `H` only where it gives history.
+    notation(self) -> string
+        val out = s"R${self.range},W${hex(self.code)}"
+
+        if self.history > 2 then s"${out},H${self.history}" else out
+
+    same(self, other: BinaryLineRule) -> bool =
+        self.range == other.range && self.code == other.code && self.states() == other.states()
+
+    // The generation after `now`, a line of cells a byte apiece, written to `next`. On a ring the
+    // line's ends meet; otherwise the cells beyond them are dead.
+    step(self, now: Buf[u8], next: Buf[u8], ring: bool)
+        val r = self.range
+
+        for x in 0..<int(now.len())
+            var n = 0
+
+            for d in -r..r
+                n = n * 2 + (if live_at(now, x + d, ring) then 1 else 0)
+
+            next[usize(x)] = after(now[usize(x)], (self.code >> u512(n)) & 1 == 1, self.states())
+end BinaryLineRule
+
+// Read a 1-D binary rule, `R2,WBF8A5CD8` or with history `R2,WBF8A5CD8,H5`. Letters and hexadecimal
+// digits may be either case. The code may have leading zeros, but no more significant digits than
+// the range's arrangements need: 2 at range 1, 8 at 2, 32 at 3 and 128 at 4.
+parse_binary_line(text: string) -> Result[BinaryLineRule, Diagnostic]
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+    letter(&s, u8('R'))?
+
+    val (r, r_at) = number(&s)?
+
+    if r < 1 || r > MOST_BINARY_RANGE then return Err(error(r_at, s"a 1-D binary rule's range is 1 to ${MOST_BINARY_RANGE}"))
+
+    comma(&s)?
+    letter(&s, u8('W'))?
+
+    val code = read_code(&s, r)?
+    var history = 0
+
+    if s.accept(u8(','))
+        letter(&s, u8('H'))?
+
+        val (h, h_at) = number(&s)?
+
+        if h > MOST_BINARY_STATES then return Err(error(h_at, s"`H` is the number of states, 0 to ${MOST_BINARY_STATES}"))
+
+        history = h
+
+    end_of(&s, text)?
+    Ok(BinaryLineRule(r, code, history))
+end parse_binary_line
+
+// The hexadecimal code after `W`, as wide as range `r` allows: a bit for each of 2^(2r + 1)
+// arrangements, a digit for every four.
+private read_code(s: *Scanner, r: int) -> Result[u512, Diagnostic]
+    val start = s.offset
+    var code = u512(0)
+    // Digits after the leading zeros.
+    var digits = 0
+    val most = (1 << (2 * r + 1)) / 4
+
+    loop
+        val d = hex_digit(s.peek().unwrap_or(0))
+
+        if d < 0 then break
+
+        if digits > 0 || d > 0 then digits += 1
+
+        if digits > most
+            while hex_digit(s.peek().unwrap_or(0)) >= 0
+                s.bump()
+
+            return Err(error(Span(start, s.offset), s"at range ${r} the rule is at most ${most} hexadecimal digits, a bit for each of ${most * 4} arrangements"))
+
+        code = code << 4 | u512(d)
+        s.bump()
+
+    if s.offset == start then return Err(error(s.here(), "expected the rule in hexadecimal after `W`, such as W6E"))
+
+    Ok(code)
+
+// What hexadecimal digit `c` is, or -1.
+private hex_digit(c: u8) -> int
+    if c.is_digit() then return int(c - u8('0'))
+
+    val u = upper(c)
+
+    if u >= u8('A') && u <= u8('F') then int(u - u8('A')) + 10 else -1
+
+// `n` in capital hexadecimal digits with no leading zeros.
+private hex(n: u512) -> string
+    if n == 0 then return "0"
+
+    var out = ""
+    var rest = n
+
+    while rest != 0
+        out = s"${"0123456789ABCDEF"[usize(rest & 15)..<usize(rest & 15) + 1]}${out}"
+        rest = rest >> 4
+
+    out
+
+// -- 1-D totalistic ----------------------------------------------------------------------------------
+
+// A 1-D totalistic rule: bit `n` of `survive` says a live cell with `n` live cells within `range` of
+// it survives, and bit `n` of `birth` that a dead one with `n` is born; the cell itself is counted
+// when `middle` is set.
+struct TotalisticLineRule
+    range: int
+    // MCell's `C`: as given, 0 to 256, history when more than 2.
+    count: int
+    middle: bool
+    survive: u32
+    birth: u32
+
+    states(self) -> int = if self.count > 2 then self.count else 2
+
+    // The rule as MCell writes it: range, states, middle, then the survivals and births ascending,
+    // each with its own letter.
+    notation(self) -> string
+        var out = s"R${self.range},C${self.count},M${if self.middle then 1 else 0}"
+
+        for n in 0..<32
+            if (self.survive >> u32(n)) & 1 == 1 then out = s"${out},S${n}"
+
+        for n in 0..<32
+            if (self.birth >> u32(n)) & 1 == 1 then out = s"${out},B${n}"
+
+        out
+
+    same(self, other: TotalisticLineRule) -> bool =
+        self.range == other.range && self.states() == other.states() && self.middle == other.middle &&
+            self.survive == other.survive && self.birth == other.birth
+
+    // The generation after `now`, as `BinaryLineRule.step` writes it.
+    step(self, now: Buf[u8], next: Buf[u8], ring: bool)
+        val r = self.range
+
+        for x in 0..<int(now.len())
+            var n = 0
+
+            for d in -r..r
+                if (d != 0 || self.middle) && live_at(now, x + d, ring) then n += 1
+
+            val state = now[usize(x)]
+            val set = if state == 0 then self.birth else self.survive
+
+            next[usize(x)] = after(state, (set >> u32(n)) & 1 == 1, self.states())
+end TotalisticLineRule
+
+// Read a 1-D totalistic rule, `R3,C0,M1,S3,S6,S7,B0,B1`: `R`, `C` and `M` in that order, then any
+// number of `S` and `B` totals in any order. Letters may be either case. The range is 1 to 10 and the
+// states 0 to 256, as MCell has them; a total may be no more than the cells it counts.
+parse_totalistic_line(text: string) -> Result[TotalisticLineRule, Diagnostic]
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+    letter(&s, u8('R'))?
+
+    val (r, r_at) = number(&s)?
+
+    if r < 1 || r > MOST_TOTALISTIC_RANGE
+        return Err(error(r_at, s"a 1-D totalistic rule's range is 1 to ${MOST_TOTALISTIC_RANGE}"))
+
+    comma(&s)?
+    letter(&s, u8('C'))?
+
+    val (c, c_at) = number(&s)?
+
+    if c > MOST_TOTALISTIC_STATES then return Err(error(c_at, s"`C` is the number of states, 0 to ${MOST_TOTALISTIC_STATES}"))
+
+    comma(&s)?
+    letter(&s, u8('M'))?
+
+    val (m, m_at) = number(&s)?
+
+    if m > 1 then return Err(error(m_at, "`M` is 0 or 1: whether the middle cell counts"))
+
+    val most = 2 * r + m
+    var survive: u32 = 0
+    var birth: u32 = 0
+
+    loop
+        s.skip_blanks()
+
+        if s.at_end() || s.peek() == Some(u8(':')) then break
+
+        comma(&s)?
+
+        val key = upper(s.peek().unwrap_or(0))
+
+        if key != u8('S') && key != u8('B')
+            return Err(error(Span(s.offset, s.offset + 1), "expected `S` or `B` and a total, such as S2 or B3"))
+
+        s.bump()
+
+        val (n, n_at) = number(&s)?
+
+        if n > most then return Err(error(n_at, s"a total is 0 to ${most}, the cells counted at range ${r}"))
+
+        if key == u8('S') then survive |= u32(1) << u32(n) else birth |= u32(1) << u32(n)
+
+    end_of(&s, text)?
+    Ok(TotalisticLineRule(r, c, m == 1, survive, birth))
+end parse_totalistic_line
+
+// -- shared ------------------------------------------------------------------------------------------
+
+// Is the rule at the start of `text` one of MCell's 1-D families: `R`, a range and a comma, then `W`
+// for 1-D binary, or anything without Larger than Life's `..` for 1-D totalistic? The answer is
+// `W`, `T` or 0.
+line_family(text: string) -> u8
+    var s = scanner_of(text)
+
+    s.skip_blanks()
+
+    if upper(s.peek().unwrap_or(0)) != u8('R') then return 0
+
+    var k = usize(1)
+
+    while s.peek_at(k).map(c -> c.is_digit()).unwrap_or(false)
+        k += 1
+
+    if k == 1 || s.peek_at(k) != Some(u8(',')) then return 0
+
+    if upper(s.peek_at(k + 1).unwrap_or(0)) == u8('W') then return u8('W')
+
+    if text.contains("..") then 0 else u8('T')
+
+// Whether the cell at `x` of a line is live, in state 1: wrapped round a ring, dead beyond the ends.
+private live_at(line: Buf[u8], x: int, ring: bool) -> bool
+    val n = int(line.len())
+
+    if x >= 0 && x < n then return line[usize(x)] == 1
+
+    if !ring then return false
+
+    line[usize((x % n + n) % n)] == 1
+
+// What a cell in `state` becomes, `next` being what the rule says of a dead or live cell; a decaying
+// cell goes on decaying whatever the rule says.
+private after(state: u8, next: bool, states: int) -> u8
+    if state == 0 then return if next then 1 else 0
+
+    if state == 1
+        if next then return 1
+
+        return if states > 2 then 2 else 0
+
+    if int(state) + 1 >= states then 0 else state + 1

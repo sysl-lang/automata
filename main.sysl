@@ -1,8 +1,10 @@
 // Cellular automata: a bit-packed grid, any B/S, isotropic non-totalistic, Generations or Larger
-// than Life rule, Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life and
-// Margolus rules, Golly rule tables, RLE and MCell patterns, and a syslUI viewer.
+// than Life rule, Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life,
+// Margolus, 1-D binary and 1-D totalistic rules, Golly rule tables, RLE and MCell patterns, and a
+// syslUI viewer.
 //
-//     automata [--rule <B…/S… | B…/S…/C… | W… | R…/T…/C…/N… | MS,D…> | --rule-file <file.rule>]
+//     automata [--rule <B…/S… | B…/S…/C… | W… | R…/T…/C…/N… | MS,D… | R…,W… | R…,C…,M…,S…,B…>
+//              | --rule-file <file.rule>]
 //              [--pattern <1-8 | file.rle | file.mcl>]
 //              [--size <w>x<h>] [--torus | --bounded]
 //     automata --shot <png> [--generations <n>] [same options]

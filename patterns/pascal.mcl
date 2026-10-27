@@ -1,0 +1,9 @@
+#MCell 4.00
+#GAME 1-D totalistic
+#RULE R1,C0,M1,B1
+#BOARD 256x128
+#WRAP 0
+#D Pascal's Triangle: one live cell, and Pascal's triangle taken mod 2 below it.
+#D A cell is born where exactly one of its neighbours is live, and no cell survives.
+#D The rule is MCell's own example of its 1-D totalistic family.
+#L A

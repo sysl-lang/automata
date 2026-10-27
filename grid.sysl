@@ -142,6 +142,12 @@ struct Grid
             self.fresh = false
             return
 
+        rule match
+            BinaryLine(_) | TotalisticLine(_) ->
+                self.step_line(rule)
+                return
+            _ -> ()
+
         self.front = -1
 
         rule match
@@ -175,7 +181,7 @@ struct Grid
                 m.step(self.states, self.spare_states, self.width, self.height, self.edges == Torus, self.phase)
                 self.swap_states()
                 self.phase = 1 - self.phase
-            Wolfram(_) -> ()
+            Wolfram(_) | BinaryLine(_) | TotalisticLine(_) -> ()
 
     // One generation under a rule table: a cell's state and its neighbours' make an index, and the
     // table holds what the cell becomes there. Then the bits are brought into line with the bytes.
@@ -397,6 +403,49 @@ struct Grid
         for k in 0..<self.stride
             self.cells[self.word_at(k, self.front)] = self.spare[usize(k)]
     end step_wolfram
+
+    // One generation under one of MCell's 1-D rules, its line and history kept as a Wolfram rule's
+    // are, but a byte per cell, since with history a cell has more than two states.
+    private step_line(*self, rule: Rule)
+        self.keep_states()
+
+        if self.front < 0
+            self.front = 0
+
+            for y in 0..<self.height
+                for k in 0..<self.stride
+                    if self.cells[self.word_at(k, y)] != 0 then self.front = y
+
+        val w = usize(self.width)
+        val now: Buf[u8] = buf_filled(w, 0)
+        val next: Buf[u8] = buf_filled(w, 0)
+        val ring = self.edges == Torus
+
+        for x in 0..<self.width
+            now[usize(x)] = self.states[self.byte_at(x, self.front)]
+
+        rule match
+            BinaryLine(b) -> b.step(now, next, ring)
+            TotalisticLine(t) -> t.step(now, next, ring)
+            _ -> panic("not a 1-D rule")
+
+        if self.front == self.height - 1
+            for i in 0..<usize(self.stride * (self.height - 1))
+                self.cells[i] = self.cells[i + usize(self.stride)]
+
+            for i in 0..<w * usize(self.height - 1)
+                self.states[i] = self.states[i + w]
+        else
+            self.front += 1
+
+        for k in 0..<self.stride
+            self.cells[self.word_at(k, self.front)] = 0
+
+        for x in 0..<self.width
+            self.states[self.byte_at(x, self.front)] = next[usize(x)]
+
+            if next[usize(x)] != 0 then self.cells[self.word_at(x / 64, self.front)] |= u64(1) << u64(x % 64)
+    end step_line
 
     // Word `k` of row `y`, with the row wrapped on a torus and an empty row beyond a bounded edge.
     private row_word(self, y: int, k: int) -> u64

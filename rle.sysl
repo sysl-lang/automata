@@ -56,11 +56,14 @@ struct Pattern
 
         most
 
-    // Draw it centred; under a Wolfram rule at the top, centred across, since the rows below it are
-    // its future. Under a Margolus rule the corner lands on even coordinates, so the pattern meets the
-    // blocks the first step cuts as it was drawn to.
+    // Draw it centred; under a Wolfram rule or one of MCell's 1-D rules at the top, centred across,
+    // since the rows below it are its future. Under a Margolus rule the corner lands on even
+    // coordinates, so the pattern meets the blocks the first step cuts as it was drawn to.
     stamp_centred(self, g: *Grid)
-        val top = if self.rule is Some(Wolfram(_)) then 0 else (g.height - self.height) / 2
+        val line = self.rule match
+            Some(Wolfram(_)) | Some(BinaryLine(_)) | Some(TotalisticLine(_)) -> true
+            _ -> false
+        val top = if line then 0 else (g.height - self.height) / 2
         val left = (g.width - self.width) / 2
 
         if self.rule is Some(Margolus(_))
