@@ -154,12 +154,12 @@ struct Model
         elif !self.on_plane
             self.message.set("HashLife runs on the unbounded plane: t moves onto it")
         else
-            hashlife_refusal(self.rule) match
-                Some(why) -> self.message.set(why)
-                None ->
-                    self.hashlife = true
-                    self.replant()
-                    self.message.set(s"HashLife: a step is 2^${self.step_log} generations")
+            if hashlife_refusal(self.rule) is Some(why)
+                self.message.set(why)
+            else
+                self.hashlife = true
+                self.replant()
+                self.message.set(s"HashLife: a step is 2^${self.step_log} generations")
 
     // Make HashLife's step 2^`j` generations, within 2^0 to 2^MOST_JUMP.
     step_size(*self, j: int)
@@ -182,9 +182,7 @@ struct Model
 
     // Replace the board with `p`, centred, under its own rule if it names one.
     load(*self, p: Pattern)
-        p.rule match
-            Some(r) -> self.leave_plane_for(r)
-            None -> ()
+        if p.rule is Some(r) then self.leave_plane_for(r)
 
         if self.on_plane
             self.plane.clear()
@@ -195,11 +193,9 @@ struct Model
 
         self.generation.set(0)
 
-        p.rule match
-            Some(r) ->
-                self.rule = r
-                self.rule_text.set(r.notation())
-            None -> ()
+        if p.rule is Some(r)
+            self.rule = r
+            self.rule_text.set(r.notation())
 
         self.replant()
         self.message.set(if p.name != "" then p.name else "pattern loaded")

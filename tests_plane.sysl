@@ -316,10 +316,7 @@ plane_model_edits()
     assert_eq(m.plane.population(), 0)
     assert(status(m).contains("box empty"), status(m))
 
-// `Model.randomize` asks `self.rule is Cyclic(c)`, and sysl 0.7.2 hangs or traps on an `is` test
-// that binds a payload holding a `Buf` when the value is another variant.
-@test("a random soup on the plane stays on the plane, over the grid's region about the origin",
-      ignore: "sysl 0.7.2 miscompiles `if x is V(c)` where V's payload holds a Buf")
+@test("a random soup on the plane stays on the plane, over the grid's region about the origin")
 plane_model_random()
     val m = model(grid(32, 32, Torus), life())
 
@@ -332,8 +329,7 @@ plane_model_random()
     assert(w >= -16 && n >= -16 && e < 16 && s < 16)
     assert(m.plane.population() > 100)
 
-@test("a random soup on a torus fills the grid under a B/S rule",
-      ignore: "sysl 0.7.2 miscompiles `if x is V(c)` where V's payload holds a Buf")
+@test("a random soup on a torus fills the grid under a B/S rule")
 grid_model_random()
     val m = model(grid(32, 32, Torus), life())
 

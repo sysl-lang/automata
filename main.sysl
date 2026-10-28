@@ -125,9 +125,7 @@ private macrocell_model(o: Options) -> Result[&Model, string]
     if o.rule != ""
         u.rule = parse_rule(o.rule).map_err(d -> s"--rule could not be read\n${d.render(source_of("--rule", o.rule))}")?
 
-        hashlife_refusal(u.rule) match
-            Some(why) -> return Err(s"--rule: ${why}")
-            None -> ()
+        if hashlife_refusal(u.rule) is Some(why) then return Err(s"--rule: ${why}")
 
     val m = model(grid(o.width, o.height, Torus), u.rule)
 

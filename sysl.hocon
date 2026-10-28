@@ -15,7 +15,7 @@
 package {
   name    = "automata"
   version = "0.1.0"
-  sysl    = "0.7.2"
+  sysl    = "0.7.3"
 }
 
 optimization = "2"

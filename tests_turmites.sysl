@@ -224,7 +224,7 @@ tur_langton_by_hand()
         assert_eq(y, ys[i], s"step ${i + 1}")
         assert_eq(s, states[i], s"step ${i + 1}")
         assert_eq(black(g), blacks[i], s"step ${i + 1}")
-        assert_eq(g.population(), blacks[i] + (if s < 6 then 1 else 0))
+        assert_eq(g.population(), blacks[i] + if s < 6 then 1 else 0)
 
 @test("Langtons-Ant.rule steps as Langton's ant does, expanded and walked")
 tur_langton_reference()

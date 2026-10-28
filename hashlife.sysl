@@ -203,7 +203,7 @@ struct Universe
                     box = (min(box.0, x), min(box.1, y), max(box.2, x), max(box.3, y))
         else
             val half = i64(1) << i64(node.level - 1)
-            val kids: [4](int, i64, i64) = [(node.nw, 0, 0), (node.ne, half, 0), (node.sw, 0, half), (node.se, half, half)]
+            val kids = [(node.nw, 0, 0), (node.ne, half, 0), (node.sw, 0, half), (node.se, half, half)]
 
             for (k, dx, dy) in kids
                 if self.node(k).pop > 0
@@ -607,9 +607,9 @@ end Universe
 
 // An empty universe under `rule`, or why the rule cannot run under HashLife.
 universe(rule: Rule) -> Result[Universe, string]
-    hashlife_refusal(rule) match
-        Some(why) -> Err(why)
-        None -> Ok(fresh(rule))
+    if hashlife_refusal(rule) is Some(why) then return Err(why)
+
+    Ok(fresh(rule))
 
 // Why `rule` cannot run under HashLife, or nothing if it can: the rules the plane runs can, and no
 // others.
@@ -737,9 +737,9 @@ private header(u: *Universe, line: string, start: usize) -> Result[unit, Diagnos
 
         val rule = parse_rule(text).map_err(d -> moved(d, at))?
 
-        hashlife_refusal(rule) match
-            Some(why) -> return Err(error(Span(at, at + text.len), why))
-            None -> u.rule = rule
+        if hashlife_refusal(rule) is Some(why) then return Err(error(Span(at, at + text.len), why))
+
+        u.rule = rule
     elif line.starts_with("#G")
         val text = line[2..<line.len].trim()
         val at = start + line.len - text.len
