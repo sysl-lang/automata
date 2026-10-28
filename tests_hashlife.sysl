@@ -497,7 +497,7 @@ hashlife_new_rule()
 
 // -- the viewer under HashLife --------------------------------------------------------------------------
 
-private model_with(args: []string) -> &Model = model_of(options(args).unwrap()).unwrap()
+private model_with(args: []string) -> &Model = model_of(options(args).unwrap(), "automata").unwrap()
 
 @test("--hashlife runs the viewer's plane as the plane's own step does, a generation or 2^j at a time")
 hashlife_model_runs()
@@ -573,7 +573,7 @@ hashlife_model_switch()
     grid.use_hashlife(true)
     assert(!grid.hashlife_on())
     assert(grid.message.read().contains("runs on the unbounded plane"), grid.message.read())
-    assert(model_of(options(["automata", "--torus", "--hashlife"]).unwrap()).unwrap_err().contains("unbounded plane"))
+    assert(model_of(options(["automata", "--torus", "--hashlife"]).unwrap(), "automata").unwrap_err().contains("unbounded plane"))
 
     // Onto a torus and back: the grid takes the cells in its region from the universe, and HashLife
     // resumes from them.
@@ -611,7 +611,7 @@ hashlife_model_macrocell()
     assert_eq(h.rule.notation(), "B36/S23")
     assert_eq(h.universe.rule.notation(), "B36/S23")
 
-    val no = (args: []string) ->model_of(options(args).unwrap()).unwrap_err()
+    val no = (args: []string) -> model_of(options(args).unwrap(), "automata").unwrap_err()
 
     assert(no(["automata", "--pattern", "patterns/logarithmic-width.mc", "--torus"]).contains("unbounded universe"))
     assert(no(["automata", "--pattern", "patterns/logarithmic-width.mc", "--rule", "B0/S"]).contains("has B0"))

@@ -1,0 +1,48 @@
+// Rules by name, as Golly's RuleLoader finds them: a rule string that is not a notation is a name, and
+// the rule is the table in `<name>.rule`. The file name is the rule name spelled exactly, and the
+// file's own `@RULE` line must spell it the same way.
+
+import sh.sysl.parsing.source_of
+import sysl.buf.{Buf, buf}
+import sysl.fs.{NotFound, read_text}
+import sysl.path.{join, normalize, parent}
+
+// The directories a rule name is looked for in, first to last: the one `--rules-dir` gave, then
+// `rules` in the current directory, then `rules` beside the program.
+rule_dirs(given: string, program: string) -> Buf[string]
+    val dirs: Buf[string] = buf()
+
+    if given != "" then dirs.push(given)
+
+    dirs.push("rules")
+
+    if parent(program) is Some(beside)
+        val rules = normalize(join(beside, "rules"))
+
+        if rules != "rules" then dirs.push(rules)
+
+    dirs
+
+// The table in `<name>.rule` from the first directory that has such a file, or `None` when none does.
+// A file that is there but cannot be used is an error, and the search stops at it. `name` is one
+// `names_a_rule` accepts, which has no `/` in it.
+find_rule(name: string, dirs: Buf[string]) -> Result[Option[RuleTable], string]
+    for i in 0..<dirs.len()
+        val file = join(dirs[i], s"${name}.rule")
+
+        read_text(file) match
+            Err(e) ->
+                if e != NotFound then return Err(s"${file}: ${e}")
+            Ok(text) ->
+                val t = parse_rule_file(text).map_err(d -> s"${file} is not a rule file this can read\n${d.render(source_of(file, text))}")?
+
+                if t.name != name
+                    return Err(s"${file} says @RULE ${t.name}, which is not ${name}: the name must match the file's exactly")
+
+                return Ok(Some(t))
+
+    Ok(None)
+
+// What a name that is neither a notation nor a file looks like to the person who typed it.
+not_found(name: string, dirs: Buf[string]) -> string
+    s"not a known notation, and no ${name}.rule in ${if dirs.len() == 0 then "any directory" else dirs.join(", ")}"

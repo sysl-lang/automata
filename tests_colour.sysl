@@ -246,7 +246,7 @@ col_pattern_errors()
     assert(rule_file("rules/Immigration.rule", "", quad).unwrap_err().contains("state 4, and Immigration's states are 0 to 2"))
     assert(rule_file("rules/Life.rule", "", immigration).unwrap_err().contains("state 2, and Life's states are 0 to 1"))
     assert(rule_file("rules/Immigration.rule", "B3/S23", immigration).unwrap_err().contains("give one"))
-    assert(chosen_rule("", quad).unwrap_err().contains("rule is `QuadLife`, which is a rule file's name"))
+    assert(chosen_rule("", quad).unwrap_err().contains("rule is `QuadLife`, which is not a known notation, and no QuadLife.rule in any directory"))
     assert(chosen_rule("", immigration).unwrap_err().contains("rule is `Immigration`"))
 
     val cases = [

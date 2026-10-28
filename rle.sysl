@@ -155,7 +155,7 @@ end parse_rle
 
 // Whether a header's rule is a name, as Golly's rule files are named, rather than B/S notation: a
 // letter, then letters, digits, `-` and `_`, and not a `B` or `S` followed by a count or a `/`.
-private names_a_rule(text: string) -> bool
+names_a_rule(text: string) -> bool
     val b = text.bytes
 
     if b.len == 0 || !b[0].is_alpha() then return false

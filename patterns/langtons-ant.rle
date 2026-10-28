@@ -1,5 +1,5 @@
 #N Langton's ant
 #C One ant facing north on an empty white plane. After about 10,000 steps of chaos it builds
-#C the period-104 diagonal highway. Run with --rule-file rules/Langtons-Ant.rule.
+#C the period-104 diagonal highway. Its rule is Langtons-Ant.
 x = 1, y = 1, rule = Langtons-Ant
 B!
