@@ -251,8 +251,9 @@ plane_runs(rule: Rule) -> bool =
         Isotropic(h) -> h.answers[0] == 0
         _ -> false
 
-// What a row's word becomes under `rule`, from its neighbourhood.
-private next_word(rule: Rule, w: [9]u64) -> u64 =
+// What a row's word becomes under `rule`, from its neighbourhood. HashLife steps its smallest squares
+// through it too.
+next_word(rule: Rule, w: [9]u64) -> u64 =
     rule match
         LifeLike(b, s) -> life_bits(w, MOORE_WORDS, b, s)
         Hex(b, s) -> life_bits(w, HEX_WORDS, b, s)

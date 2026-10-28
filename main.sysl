@@ -1,17 +1,20 @@
 // Cellular automata: a bit-packed grid, any B/S, isotropic non-totalistic, Generations or Larger
 // than Life rule, Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life,
-// Margolus, 1-D binary and 1-D totalistic rules, Golly rule tables, RLE and MCell patterns, and a
-// syslUI viewer.
+// Margolus, 1-D binary and 1-D totalistic rules, Golly rule tables, HashLife, RLE, MCell and Golly
+// macrocell patterns, and a syslUI viewer.
 //
 //     automata [--rule <B…/S… | B…/S…/C… | W… | R…/T…/C…/N… | MS,D… | R…,W… | R…,C…,M…,S…,B…>
 //              | --rule-file <file.rule>]
-//              [--pattern <1-8 | file.rle | file.mcl>]
-//              [--size <w>x<h>] [--torus | --bounded]
+//              [--pattern <1-8 | file.rle | file.mcl | file.mc>]
+//              [--size <w>x<h>] [--torus | --bounded] [--hashlife] [--step <j>]
 //     automata --shot <png> [--generations <n>] [same options]
 //
 // A B/S or isotropic rule without B0 runs on an unbounded plane unless `--torus` or `--bounded` asks
 // for a grid; every other rule runs on the grid, a torus unless `--bounded`. `--size` is the grid's
 // size, and on the plane the size of the region the first view shows.
+//
+// `--hashlife` runs the plane under HashLife, each step 2^`j` generations by `--step` (0 unless
+// given); a Golly macrocell file (`.mc`) always runs under it. `--generations` counts steps then.
 //
 // `--shot` draws one frame with no window at all, after running the pattern for a fixed number of
 // generations, and writes it to a PNG: syslUI rasterizes into a PlutoVG surface either way, and the
@@ -40,23 +43,13 @@ struct Options
     // Whether `--size` and `--torus` or `--bounded` were given, which an MCell file's `#BOARD` and `#WRAP` give way to.
     sized: bool
     edged: bool
+    // Whether HashLife runs the plane, and its step: 2^`step` generations.
+    hashlife: bool
+    step: int
 
 main(args: []string) -> Result[unit, string]
-    var o = options(args)?
-    val p = pattern_of(o.pattern)?
-
-    if p.board is Some((w, h))
-        if !o.sized
-            o.width = w
-            o.height = h
-
-    if !o.edged && p.wrap == Some(false) then o.edges = Bounded
-
-    val rule = if o.rule_file == "" then chosen_rule(o.rule, p)? else rule_file(o.rule_file, o.rule, p)?
-    val m = model(grid(o.width, o.height, o.edges), rule)
-
-    m.start(p, starts_on_plane(o, p, rule))
-    m.message.set(p.name)
+    val o = options(args)?
+    val m = model_of(o)?
 
     if o.shot == ""
         return run(app("automata", () -> screen(m), () -> GROUND, WIDTH, HEIGHT,
@@ -81,6 +74,66 @@ main(args: []string) -> Result[unit, string]
     print(s"wrote ${o.shot}: ${status(m)}")
     Ok(())
 end main
+
+// The model the command line asks for, running under HashLife if `--hashlife` said so or the pattern is
+// a macrocell file.
+model_of(o: Options) -> Result[&Model, string]
+    val m = if o.pattern.ends_with(".mc") then macrocell_model(o)? else pattern_model(o)?
+
+    m.step_log = o.step
+
+    if o.hashlife && !m.hashlife
+        if !m.on_plane then return Err("--hashlife runs on the unbounded plane, and this starts on a grid")
+
+        m.hashlife = true
+        m.replant()
+
+    Ok(m)
+
+// The model for an RLE or MCell pattern, or a bundled one.
+private pattern_model(given: Options) -> Result[&Model, string]
+    var o = given
+    val p = pattern_of(o.pattern)?
+
+    if p.board is Some((w, h))
+        if !o.sized
+            o.width = w
+            o.height = h
+
+    if !o.edged && p.wrap == Some(false) then o.edges = Bounded
+
+    val rule = if o.rule_file == "" then chosen_rule(o.rule, p)? else rule_file(o.rule_file, o.rule, p)?
+    val m = model(grid(o.width, o.height, o.edges), rule)
+
+    m.start(p, starts_on_plane(o, p, rule))
+    m.message.set(p.name)
+    Ok(m)
+
+// The model for a Golly macrocell file: its universe under HashLife, on the plane, under its own rule
+// or the one `--rule` gives.
+private macrocell_model(o: Options) -> Result[&Model, string]
+    if o.edged then return Err("a macrocell file is an unbounded universe: --torus and --bounded do not apply")
+
+    if o.rule_file != "" then return Err("a macrocell file runs under HashLife, which takes a B/S or isotropic rule, not a rule file")
+
+    val text = read_text(o.pattern).map_err(e -> s"${o.pattern}: ${e}")?
+    var u = parse_mc(text).map_err(d -> s"${o.pattern} is not a macrocell file this can read\n${d.render(source_of(o.pattern, text))}")?
+
+    if o.rule != ""
+        u.rule = parse_rule(o.rule).map_err(d -> s"--rule could not be read\n${d.render(source_of("--rule", o.rule))}")?
+
+        hashlife_refusal(u.rule) match
+            Some(why) -> return Err(s"--rule: ${why}")
+            None -> ()
+
+    val m = model(grid(o.width, o.height, Torus), u.rule)
+
+    m.start_universe(u)
+    m.message.set(o.pattern)
+    // The first frame fits the universe, which may lie anywhere.
+    m.placed = true
+    m.fitting = true
+    Ok(m)
 
 // Whether to start on the unbounded plane: under a rule that can run there, unless `--torus` or
 // `--bounded` asked for a grid, or an MCell file's `#WRAP` said whether its board wraps.
@@ -117,11 +170,16 @@ rule_file(file: string, given: string, p: Pattern) -> Result[Rule, string]
     Ok(Table(t))
 
 options(args: []string) -> Result[Options, string]
-    var o = Options("", "", "4", 192, 144, Torus, "", 100, false, false)
+    var o = Options("", "", "4", 192, 144, Torus, "", 100, false, false, false, 0)
     var i = 1
 
     while i < args.len
         val flag = args[i]
+
+        if flag == "--hashlife"
+            o.hashlife = true
+            i += 1
+            continue
 
         if flag == "--torus" || flag == "--bounded"
             val edges = if flag == "--torus" then Torus else Bounded
@@ -147,6 +205,10 @@ options(args: []string) -> Result[Options, string]
             o.shot = value
         elif flag == "--generations"
             o.generations = parse_int(value).map_err(e -> s"--generations: `${value}` is not a number")?
+        elif flag == "--step"
+            o.step = parse_int(value).map_err(e -> s"--step: `${value}` is not a number")?
+
+            if o.step < 0 || o.step > MOST_JUMP then return Err(s"--step: a step is 2^0 to 2^${MOST_JUMP} generations, given as 0 to ${MOST_JUMP}")
         elif flag == "--size"
             val (w, h) = size_of(value).ok_or(s"--size: expected <width>x<height>, such as 256x192")?
 

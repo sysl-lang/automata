@@ -11,7 +11,8 @@ import sh.sysl.ui.{View, Canvas, Size, Rect, Signal, signal, column, row, text, 
 import sh.sysl.ui_sdl.stop
 import sh.sysl.sdl3.{Event, EventKind, SCANCODE_ESCAPE, SCANCODE_SPACE, SCANCODE_N, SCANCODE_R,
                      SCANCODE_C, SCANCODE_T, SCANCODE_F, SCANCODE_0, SCANCODE_1, SCANCODE_EQUALS, SCANCODE_MINUS,
-                     SCANCODE_KP_PLUS, SCANCODE_KP_MINUS, SCANCODE_RETURN, SCANCODE_KP_ENTER}
+                     SCANCODE_KP_PLUS, SCANCODE_KP_MINUS, SCANCODE_RETURN, SCANCODE_KP_ENTER, SCANCODE_H,
+                     SCANCODE_LEFTBRACKET, SCANCODE_RIGHTBRACKET}
 import sysl.buf.{Buf, buf}
 import sysl.math.{Float, clamp, max, min}
 import sysl.rand.{Rng, rng}
@@ -60,24 +61,110 @@ struct Model
     // Which of the patterns past the number keys' `0` loads next.
     more: int
     random: Rng
-    generation: &Signal[int]
+    generation: &Signal[i64]
     rule_text: &Signal[string]
     message: &Signal[string]
+    // Whether HashLife runs the plane in place of the plane's own step. While it does, the universe
+    // holds the cells, and the plane holds only those under the board, drawn onto it from the universe
+    // when the board is painted: `window` is the cells it holds, west, north, across and down, and
+    // `shown` says they are the universe's as it is now. A pattern or soup put on the plane replaces
+    // the universe at once.
+    hashlife: bool
+    universe: Universe
+    shown: bool
+    window: (i64, i64, i64, i64)
+    // Each step HashLife takes is 2^`step_log` generations.
+    step_log: int
 
     // Something the status line shows has changed.
     touched(*self) = self.generation.set(self.generation.read())
 
+    // Is HashLife what runs?
+    hashlife_on(self) -> bool = self.on_plane && self.hashlife
+
     advance(*self, n: int)
+        if self.on_plane && self.hashlife
+            self.advance_hashlife(n)
+            return
+
         for i in 0..<n
             if self.on_plane then self.plane.step(self.rule) else self.grid.step(self.rule)
 
-        self.generation.set(self.generation.read() + n)
+        self.generation.set(self.generation.read() + i64(n))
+
+    // `n` of HashLife's steps.
+    private advance_hashlife(*self, n: int)
+        self.universe.set_step(self.step_log)
+
+        for i in 0..<n
+            self.universe.step()
+
+        self.shown = false
+        self.generation.set(self.generation.read() + (i64(n) << i64(self.step_log)))
+
+    // Under HashLife, the universe made again from the plane, which has just been given a whole new
+    // set of cells.
+    replant(*self)
+        if self.on_plane && self.hashlife
+            self.universe = universe_of_plane(self.rule, self.plane).unwrap()
+            self.shown = false
+
+    // Draw the universe's cells from `west`, `north`, `across` by `down`, onto the plane, unless the
+    // plane already holds them.
+    show(*self, west: i64, north: i64, across: i64, down: i64)
+        if self.shown && self.window == (west, north, across, down) then return
+
+        self.plane.clear()
+        self.universe.window_into(&self.plane, west, north, west + across - 1, north + down - 1)
+        self.window = (west, north, across, down)
+        self.shown = true
 
     // Start with `p`: at the plane's origin if `plane`, else centred on the grid.
     start(*self, p: Pattern, plane: bool)
         self.on_plane = plane
 
         if plane then p.stamp_origin(&self.plane) else p.stamp_centred(&self.grid)
+
+        self.replant()
+
+    // Start with the universe `u` under HashLife, at its own generation, on the plane.
+    start_universe(*self, u: Universe)
+        self.on_plane = true
+        self.hashlife = true
+        self.universe = u
+        self.shown = false
+        self.rule = u.rule
+        self.rule_text.set(u.rule.notation())
+        self.generation.set(u.generation)
+
+    // Run the plane under HashLife, or under its own step, or say why HashLife cannot run. Off, every
+    // cell goes back onto the plane, unless there are more than the plane should be asked to hold.
+    use_hashlife(*self, on: bool)
+        if !on
+            if !self.hashlife_on() then return
+
+            if self.universe.population() > PLANE_MOST
+                self.message.set(s"${self.universe.population()} cells are more than the plane holds: HashLife stays on")
+                return
+
+            self.plane.clear()
+            self.universe.cells_into(&self.plane)
+            self.hashlife = false
+            self.message.set("HashLife off: the plane steps a generation at a time")
+        elif !self.on_plane
+            self.message.set("HashLife runs on the unbounded plane: t moves onto it")
+        else
+            hashlife_refusal(self.rule) match
+                Some(why) -> self.message.set(why)
+                None ->
+                    self.hashlife = true
+                    self.replant()
+                    self.message.set(s"HashLife: a step is 2^${self.step_log} generations")
+
+    // Make HashLife's step 2^`j` generations, within 2^0 to 2^MOST_JUMP.
+    step_size(*self, j: int)
+        self.step_log = max(0, min(MOST_JUMP, j))
+        self.message.set(s"HashLife's step is 2^${self.step_log} generations")
 
     // Run `text` as the rule, or say why it cannot be.
     use_rule(*self, text: string)
@@ -87,6 +174,10 @@ struct Model
                 self.rule_text.set(r.notation())
                 self.message.set(s"rule ${r.notation()}")
                 self.leave_plane_for(r)
+
+                if self.hashlife_on()
+                    self.universe.use_rule(r)
+                    self.shown = false
             Err(d) -> self.message.set(s"${d.message} (column ${d.span.start + 1} of \"${text}\")")
 
     // Replace the board with `p`, centred, under its own rule if it names one.
@@ -110,6 +201,7 @@ struct Model
                 self.rule_text.set(r.notation())
             None -> ()
 
+        self.replant()
         self.message.set(if p.name != "" then p.name else "pattern loaded")
 
     // Every cell dead.
@@ -117,6 +209,7 @@ struct Model
         if self.on_plane then self.plane.clear() else self.grid.clear()
 
         self.generation.set(0)
+        self.replant()
 
     // A random soup over the grid's region; on the plane, the region centred on the origin.
     randomize(*self)
@@ -129,7 +222,13 @@ struct Model
 
     // Flip the cell at `x`, `y` of the view's own coordinates: the grid's, or the plane's.
     toggle(*self, x: i64, y: i64)
-        if self.on_plane then self.plane.toggle(x, y) else self.grid.toggle(int(x), int(y))
+        if self.hashlife_on()
+            self.universe.set(x, y, !self.universe.get(x, y))
+            self.shown = false
+        elif self.on_plane
+            self.plane.toggle(x, y)
+        else
+            self.grid.toggle(int(x), int(y))
 
         self.touched()
 
@@ -157,6 +256,7 @@ struct Model
     to_plane(*self)
         self.copy_to_plane()
         self.on_plane = true
+        self.replant()
         self.cx = -i64(self.grid.width / 2)
         self.cy = -i64(self.grid.height / 2)
 
@@ -166,7 +266,12 @@ struct Model
         val g = self.grid
         val left = i64(g.width / 2)
         val top = i64(g.height / 2)
-        val before = self.plane.population()
+        val before = if self.hashlife_on() then self.universe.population() else i64(self.plane.population())
+
+        // Under HashLife the plane holds only what was on the board: the grid's region is drawn onto it.
+        if self.hashlife_on()
+            self.plane.clear()
+            self.universe.window_into(&self.plane, -left, -top, i64(g.width) - left - 1, i64(g.height) - top - 1)
 
         self.grid.clear()
         self.grid.edges = edges
@@ -180,7 +285,7 @@ struct Model
         self.on_plane = false
         self.plane.clear()
 
-        val dropped = before - self.grid.population()
+        val dropped = before - i64(self.grid.population())
 
         if dropped > 0 then self.message.set(s"${dropped} cells beyond the ${g.width}×${g.height} grid were dropped")
 
@@ -202,6 +307,8 @@ struct Model
             for x in 0..<g.width
                 if g.get(x, y) then self.plane.set(i64(x) - left, i64(y) - top, true)
 
+        self.replant()
+
     // Whole cells of the plane camera's offset moved into its corner cell, leaving each offset in
     // `(-zoom, 0]`.
     private settle(*self)
@@ -216,7 +323,8 @@ end Model
 
 model(g: Grid, rule: Rule) -> &Model =
     Model(g, plane(), false, rule, false, 3, 4.0, 0.0, 0.0, 0, 0, false, false, 0.0, false, 0, rng(1, 1),
-          signal(0), signal(rule.notation()), signal(""))
+          signal(0), signal(rule.notation()), signal(""), false, universe(LifeLike(0b1000, 0b1100)).unwrap(), false,
+          (0, 0, 0, 0), 0)
 
 // The whole window: the board, then the status line and the rule field under it.
 screen(m: &Model) -> &View =
@@ -228,17 +336,32 @@ screen(m: &Model) -> &View =
             text_field(m.rule_text, RULE_FIELD, 160, "B3/S23"),
             button("apply", () -> m.use_rule(m.rule_text.read())),
         ], 10).padding(8),
-        text(if m.message.read() != "" then m.message.read() elif m.on_plane then PLANE_HINT else HINT)
+        text(if m.message.read() != "" then m.message.read() elif m.hashlife_on() then HASHLIFE_HINT
+             elif m.on_plane then PLANE_HINT else HINT)
             .pad(left = 8, bottom = 8),
     ])
 
 const HINT: string = "space run · n step · +/- speed · r random · c clear · t edges · 1-4 rules · 5-9, 0 patterns"
 const PLANE_HINT: string = "space run · n step · +/- speed · r random · c clear · t edges · f fit · 1-4 rules · 5-9, 0 patterns"
+const HASHLIFE_HINT: string = "space run · n step · +/- speed · [/] step size · h HashLife off · r random · c clear · t edges · f fit"
+
+// The largest step `]` makes HashLife take: 2^40 generations.
+const MOST_JUMP: int = 40
+
+// The most cells HashLife hands back to the plane when it is turned off.
+const PLANE_MOST: i64 = 1 << 22
 
 // The status line. On the plane it gives the box the live cells lie in, as its size and its north-west
 // cell, the origin being where the grid's centre was.
 status(m: &Model) -> string
     val state = if m.running then s"${SPEEDS[m.speed]}/s" else "paused"
+
+    if m.hashlife_on()
+        val box = m.universe.bounds() match
+            Some((west, north, east, south)) -> s"${east - west + 1}×${south - north + 1} at ${west}, ${north}"
+            None -> "empty"
+
+        return s"gen ${m.generation.read()}   pop ${m.universe.population()}   ${m.rule.notation()}   HashLife 2^${m.step_log}   box ${box}   ${state}"
 
     if m.on_plane
         val box = m.plane.bounds() match
@@ -368,7 +491,6 @@ private paint_plane(m: &Model, c: *Canvas, r: Rect)
     c.fill(r, BOARD)
     c.clip(r)
 
-    val p = m.plane
     val z = m.zoom
     val left = real(r.x) + m.ox
     val top = real(r.y) + m.oy
@@ -378,6 +500,10 @@ private paint_plane(m: &Model, c: *Canvas, r: Rect)
     val gap = if z >= 6.0 then 1 else 0
     val west = m.cx
     val east = m.cx + across
+
+    if m.hashlife_on() then m.show(west, m.cy, across, i64(down))
+
+    val p = m.plane
     var slots: Buf[int] = buf()
     var band = i64(0)
 
@@ -459,7 +585,9 @@ private below(n: i64) -> u64 = if n <= 0 then 0 elif n >= 64 then ~u64(0) else (
 // The view zoomed and moved so the live cells' box fills the board with a cell to spare round it; on
 // an empty plane, the first frame's view.
 private fit_plane(m: &Model, r: Rect)
-    m.plane.bounds() match
+    val box = if m.hashlife_on() then m.universe.bounds() else m.plane.bounds()
+
+    box match
         Some((west, north, east, south)) ->
             val w = real(east - west + 1)
             val h = real(south - north + 1)
@@ -553,6 +681,12 @@ shortcut(m: &Model, e: Event) -> bool
         m.cycle_edges()
     elif key == SCANCODE_F
         m.fit()
+    elif key == SCANCODE_H
+        m.use_hashlife(!m.hashlife_on())
+    elif key == SCANCODE_LEFTBRACKET
+        m.step_size(m.step_log - 1)
+    elif key == SCANCODE_RIGHTBRACKET
+        m.step_size(m.step_log + 1)
     elif key >= SCANCODE_1 && key < SCANCODE_1 + 9
         val i = usize(key - SCANCODE_1)
         val rules = preset_rules()

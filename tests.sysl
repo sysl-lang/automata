@@ -369,7 +369,7 @@ model_tick()
 
     // A long stall runs at most a frame's worth, and forgets the rest.
     tick(m, 100.0)
-    assert_eq(m.generation.read(), 5 + MOST_PER_FRAME)
+    assert_eq(m.generation.read(), i64(5 + MOST_PER_FRAME))
 
 @test("at every speed ten seconds of sixtieths owe ten seconds' generations, and the status line names that speed")
 model_pacing()
@@ -383,7 +383,7 @@ model_pacing()
             tick(m, 1.0 / 60.0)
 
         val want = min(10 * SPEEDS[usize(i)], 600 * MOST_PER_FRAME)
-        val got = m.generation.read()
+        val got = int(m.generation.read())
 
         // A sixtieth is not exact in binary, so the last generation may still be owed.
         assert(got >= want - 1 && got <= want, s"speed ${i}: ${got} generations, wanted ${want}")

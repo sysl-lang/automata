@@ -1,0 +1,837 @@
+// HashLife: Gosper's algorithm for the two-state rules the plane runs, and Golly's macrocell format.
+//
+// **The universe is a quadtree whose equal subtrees are one node.** A node at level `k` is a square of
+// 2^k × 2^k cells: a leaf, at level 3, holds its 8×8 cells in one word, row `r` in bits `8r ..< 8r + 8`
+// and cell `x` of the row bit `x`; any other node holds four children a level down, north-west,
+// north-east, south-west and south-east. Every node is made through `leaf` or `join`, which look the
+// node up first and hand back the one already made, so a region repeated anywhere in the universe, the
+// empty one above all, is held once.
+//
+// **A node's result is its centre half, 2^(k-2) generations on**, and it is computed once and kept on
+// the node. The cells of the centre half after that long depend only on the node: nothing outside it
+// can reach the centre in the time. A level-4 node's result is stepped directly, four generations at
+// most of a 16×16 square through the plane's own word step; a bigger node's is built from the results
+// of nine overlapping nodes a level down and then of four more, which is where the algorithm's speed
+// comes from — a result found once serves every place and every time the same node turns up.
+//
+// **A step advances 2^j generations**, `j` the step's size. A node whose level is more than `j + 2`
+// takes its result at that pace instead: the nine nodes contribute their centres, untouched, and only
+// the second four are stepped. Since that result depends on `j`, changing the size forgets the kept
+// results of exactly those nodes. Any number of generations is the sum of its binary digits' steps.
+//
+// **The root is always centred on the same cell**, Golly's: its south-east child's north-west cell is
+// (0, 1), `y` growing downward. Before a step the root is wrapped in empty space until the pattern lies
+// within its centre quarter and the root is big enough for the step; the step's result is the centre
+// half, still centred there, and the empty border is then trimmed off again.
+//
+// **Memory is bounded by a node limit**, enforced in the middle of a step as well as between steps,
+// since one big step can make millions of nodes. When a result is about to be computed and the table
+// holds the limit, the nodes still needed are marked — those the root reaches, the empty nodes, and
+// those the results under way are holding, which every result in progress keeps on a stack of pins —
+// and every other node is swept: taken out of the lookup tables, its slot put on a free list for the
+// next node made, and any kept result that named it forgotten. A node's number never changes, so the
+// numbers the results in progress hold stay good. If what is needed is itself near the limit, the next
+// sweep waits until the table has doubled, rather than sweeping again at once.
+//
+// **Only rules without B0 run here.** Under B0 an empty neighbourhood gives birth, so the empty node's
+// result would not be empty: the one shared empty region, which is all but a speck of the universe,
+// would have to change every generation, and so would every node built of it.
+//
+// Golly's macrocell format is at https://golly.sourceforge.io/Help/formats.html#mc. Its leaves are the
+// same 8×8 squares as these, so a file's nodes become the universe's one for one.
+
+import sh.sysl.parsing.{Diagnostic, Span, error}
+import sysl.buf.{Buf, buf, buf_filled}
+import sysl.container.{Map, map}
+import sysl.math.{min, max}
+import sysl.text.parse_int
+
+// The level of a leaf: 2^3 = 8 cells on a side.
+const LEAF: int = 3
+
+// How many nodes the table holds before the ones no longer needed are swept: about 200 MB.
+const NODE_LIMIT: int = 1 << 21
+
+// The largest step size: 2^56 generations, which keeps the root's corners within an `i64`.
+const MOST_STEP: int = 56
+
+// The cell the root is centred on: its south-east child's north-west cell, as Golly places it.
+const CENTRE_X: i64 = 0
+const CENTRE_Y: i64 = 1
+
+// Further from the centre than any cell of a universe.
+const FAR: i64 = 1 << 62
+
+struct Node
+    // The node's level, or -1 for a slot on the free list.
+    level: int
+    // The children, or -1 for a leaf.
+    nw: int
+    ne: int
+    sw: int
+    se: int
+    // A leaf's cells; 0 for any other node.
+    bits: u64
+    pop: i64
+    // The node's result at the universe's current step size, or -1 if it has not been needed.
+    result: int
+
+struct Universe
+    rule: Rule
+    nodes: Buf[Node]
+    leaves: Map[u64, int]
+    joins: Map[(int, int, int, int), int]
+    // The empty node of each level from the leaf's up, made as they are needed.
+    empties: Buf[int]
+    root: int
+    // A step advances 2^`step_log` generations.
+    step_log: int
+    generation: i64
+    limit: int
+    // How many nodes the table holds when the next sweep is due: the limit, or twice what the last
+    // sweep kept if that was more.
+    due: int
+    // How many sweeps there have been.
+    collections: int
+    // Slots swept, handed out again before the table grows.
+    free: Buf[int]
+    // The nodes the results in progress hold that the root may not reach.
+    pins: Buf[int]
+
+    // How many cells are alive.
+    population(self) -> i64 = self.node(self.root).pop
+
+    // How many nodes the table holds.
+    node_count(self) -> int = int(self.nodes.len() - self.free.len())
+
+    // The root's level: it is 2^level cells on a side.
+    level(self) -> int = self.node(self.root).level
+
+    // Is the cell at `x`, `y` alive?
+    get(self, x: i64, y: i64) -> bool
+        val half = i64(1) << i64(self.level() - 1)
+        var n = self.root
+        var dx = x - (CENTRE_X - half)
+        var dy = y - (CENTRE_Y - half)
+        var side = half * 2
+
+        if dx < 0 || dy < 0 || dx >= side || dy >= side then return false
+
+        loop
+            val node = self.node(n)
+
+            if node.pop == 0 then return false
+
+            if node.level == LEAF then return (node.bits >> u64(dy * 8 + dx)) & 1 == 1
+
+            side = side / 2
+
+            val east = dx >= side
+            val south = dy >= side
+
+            n = if south then (if east then node.se else node.sw) else (if east then node.ne else node.nw)
+
+            if east then dx -= side
+
+            if south then dy -= side
+    end get
+
+    // Set the cell at `x`, `y`, the root wrapped in empty space first if it does not reach the cell.
+    set(*self, x: i64, y: i64, alive: bool)
+        while !within(self.level(), x, y)
+            self.expand()
+
+        val half = i64(1) << i64(self.level() - 1)
+
+        self.root = self.with(self.root, CENTRE_X - half, CENTRE_Y - half, x, y, alive)
+
+    // `n`, its north-west corner at `x0`, `y0`, with the cell at `x`, `y` set.
+    private with(*self, n: int, x0: i64, y0: i64, x: i64, y: i64, alive: bool) -> int
+        val node = self.node(n)
+
+        if node.level == LEAF
+            val bit = u64(1) << u64((y - y0) * 8 + x - x0)
+
+            return self.leaf(if alive then node.bits | bit else node.bits & ~bit)
+
+        val half = i64(1) << i64(node.level - 1)
+        val east = x >= x0 + half
+        val south = y >= y0 + half
+        val cx = if east then x0 + half else x0
+        val cy = if south then y0 + half else y0
+
+        if south
+            if east then self.join(node.nw, node.ne, node.sw, self.with(node.se, cx, cy, x, y, alive))
+            else self.join(node.nw, node.ne, self.with(node.sw, cx, cy, x, y, alive), node.se)
+        elif east
+            self.join(node.nw, self.with(node.ne, cx, cy, x, y, alive), node.sw, node.se)
+        else
+            self.join(self.with(node.nw, cx, cy, x, y, alive), node.ne, node.sw, node.se)
+    end with
+
+    // Run under `rule` from here on, which must be one `universe` takes. Every kept result was under the
+    // old rule, and is forgotten.
+    use_rule(*self, rule: Rule)
+        self.rule = rule
+
+        for i in 0..<self.nodes.len()
+            self.nodes[i].result = -1
+
+    // The smallest box holding every live cell, as its west and north cells and its east and south
+    // ones, or nothing in an empty universe. Each node's own box is found once, however often it
+    // appears.
+    bounds(self) -> Option[(i64, i64, i64, i64)]
+        if self.population() == 0 then return None
+
+        val half = i64(1) << i64(self.level() - 1)
+        val (west, north, east, south) = self.extent(self.root, map())
+
+        Some((CENTRE_X - half + west, CENTRE_Y - half + north, CENTRE_X - half + east, CENTRE_Y - half + south))
+
+    // The box of `n`'s live cells relative to its north-west corner; `n` is not empty.
+    private extent(self, n: int, known: Map[int, (i64, i64, i64, i64)]) -> (i64, i64, i64, i64)
+        if known.get(n) is Some(box) then return box
+
+        val node = self.node(n)
+        var box = (FAR, FAR, -FAR, -FAR)
+
+        if node.level == LEAF
+            for i in 0..<64
+                if (node.bits >> u64(i)) & 1 == 1
+                    val (x, y) = (i64(i & 7), i64(i >> 3))
+
+                    box = (min(box.0, x), min(box.1, y), max(box.2, x), max(box.3, y))
+        else
+            val half = i64(1) << i64(node.level - 1)
+            val kids: [4](int, i64, i64) = [(node.nw, 0, 0), (node.ne, half, 0), (node.sw, 0, half), (node.se, half, half)]
+
+            for (k, dx, dy) in kids
+                if self.node(k).pop > 0
+                    val (w, nn, e, s) = self.extent(k, known)
+
+                    box = (min(box.0, w + dx), min(box.1, nn + dy), max(box.2, e + dx), max(box.3, s + dy))
+
+        known.put(n, box)
+        box
+    end extent
+
+    // Every live cell drawn onto `p`, which is not cleared first.
+    cells_into(self, p: *Plane) = self.window_into(p, -FAR, -FAR, FAR, FAR)
+
+    // The live cells within the box from `west`, `north` to `east`, `south`, inclusive, drawn onto `p`.
+    window_into(self, p: *Plane, west: i64, north: i64, east: i64, south: i64)
+        val half = i64(1) << i64(self.level() - 1)
+
+        self.draw(p, self.root, CENTRE_X - half, CENTRE_Y - half, (west, north, east, south))
+
+    private draw(self, p: *Plane, n: int, x0: i64, y0: i64, box: (i64, i64, i64, i64))
+        val node = self.node(n)
+        val side = i64(1) << i64(node.level)
+
+        if node.pop == 0 then return
+
+        if x0 > box.2 || y0 > box.3 || x0 + side - 1 < box.0 || y0 + side - 1 < box.1 then return
+
+        if node.level == LEAF
+            var w = node.bits
+
+            while w != 0
+                val i = i64(w.trailing_zeros())
+                val x = x0 + (i & 7)
+                val y = y0 + (i >> 3)
+
+                if x >= box.0 && x <= box.2 && y >= box.1 && y <= box.3 then p.set(x, y, true)
+
+                w &= w - 1
+
+            return
+
+        val half = side / 2
+
+        self.draw(p, node.nw, x0, y0, box)
+        self.draw(p, node.ne, x0 + half, y0, box)
+        self.draw(p, node.sw, x0, y0 + half, box)
+        self.draw(p, node.se, x0 + half, y0 + half, box)
+    end draw
+
+    // Advance 2^`step_log` generations.
+    step(*self)
+        while self.level() < self.step_log + 2 || !self.centred(self.root)
+            self.expand()
+
+        self.expand()
+        self.root = self.result(self.root)
+        self.generation += i64(1) << i64(self.step_log)
+
+        while self.level() > LEAF + 1 && self.centred(self.root)
+            self.root = self.centre(self.root)
+
+        if self.node_count() >= self.due then self.sweep()
+
+    // Sweep when the table holds `n` nodes.
+    set_limit(*self, n: int)
+        self.limit = n
+        self.due = n
+
+    // Advance 2^`j` generations: one step at that size, which stays the step size.
+    jump(*self, j: int)
+        self.set_step(j)
+        self.step()
+
+    // Advance exactly `n` generations, a step for each binary digit of `n` that is 1. The step size is
+    // left as it was.
+    advance(*self, n: i64)
+        if n < 0 || n >> i64(MOST_STEP + 1) != 0 then panic(s"${n} generations is not 0 to 2^${MOST_STEP + 1} - 1")
+
+        val kept = self.step_log
+
+        for j in 0..MOST_STEP
+            if (n >> i64(j)) & 1 == 1
+                self.set_step(j)
+                self.step()
+
+        self.set_step(kept)
+
+    // Make a step 2^`j` generations, forgetting the kept results that depended on the old size.
+    set_step(*self, j: int)
+        if j < 0 || j > MOST_STEP then panic(s"a step size runs from 0 to ${MOST_STEP}, not ${j}")
+
+        if j == self.step_log then return
+
+        val low = min(j, self.step_log)
+
+        for i in 0..<self.nodes.len()
+            if self.nodes[i].level - 2 > low then self.nodes[i].result = -1
+
+        self.step_log = j
+
+    // Sweep away every node that is not needed: not reached from the root, the empty nodes or the
+    // pins. The kept results that named a swept node are forgotten.
+    sweep(*self)
+        var marked = buf_filled(self.nodes.len(), false)
+
+        self.mark(marked, self.root)
+
+        for i in 0..<self.empties.len()
+            self.mark(marked, self.empties[i])
+
+        for i in 0..<self.pins.len()
+            self.mark(marked, self.pins[i])
+
+        for i in 0..<self.nodes.len()
+            val node = self.nodes[i]
+
+            if node.level < 0 || marked[i] then continue
+
+            if node.level == LEAF
+                self.leaves.remove(node.bits)
+            else
+                self.joins.remove((node.nw, node.ne, node.sw, node.se))
+
+            self.nodes[i].level = -1
+            self.free.push(int(i))
+
+        for i in 0..<self.nodes.len()
+            val r = self.nodes[i].result
+
+            if r >= 0 && !marked[usize(r)] then self.nodes[i].result = -1
+
+        self.collections += 1
+        self.due = if self.node_count() * 2 > self.limit then self.node_count() * 2 else self.limit
+    end sweep
+
+    // Mark `n` and everything under it. A buffer is a handle, so the caller's sees what this writes.
+    private mark(self, marked: Buf[bool], n: int)
+        if marked[usize(n)] then return
+
+        marked[usize(n)] = true
+
+        val node = self.node(n)
+
+        if node.level > LEAF
+            self.mark(marked, node.nw)
+            self.mark(marked, node.ne)
+            self.mark(marked, node.sw)
+            self.mark(marked, node.se)
+
+    node(self, n: int) -> Node = self.nodes[usize(n)]
+
+    // The leaf holding `bits`, made if it is new.
+    leaf(*self, bits: u64) -> int
+        if self.leaves.get(bits) is Some(n) then return n
+
+        val n = self.claim(Node(LEAF, -1, -1, -1, -1, bits, i64(bits.count_ones()), -1))
+
+        self.leaves.put(bits, n)
+        n
+
+    // The node with these four children, which are all one level, made if it is new.
+    join(*self, nw: int, ne: int, sw: int, se: int) -> int
+        val key = (nw, ne, sw, se)
+
+        if self.joins.get(key) is Some(n) then return n
+
+        val pop = self.node(nw).pop + self.node(ne).pop + self.node(sw).pop + self.node(se).pop
+        val n = self.claim(Node(self.node(nw).level + 1, nw, ne, sw, se, 0, pop, -1))
+
+        self.joins.put(key, n)
+        n
+
+    // A slot for `node`: a swept one if there is one, else a new one.
+    private claim(*self, node: Node) -> int
+        if self.free.pop() is Some(i)
+            self.nodes[usize(i)] = node
+            return i
+
+        self.nodes.push(node)
+        int(self.nodes.len()) - 1
+
+    // The node of `level` with no live cells.
+    empty(*self, level: int) -> int
+        while int(self.empties.len()) <= level - LEAF
+            val k = int(self.empties.len())
+
+            if k == 0
+                self.empties.push(self.leaf(0))
+            else
+                val e = self.empties[usize(k - 1)]
+
+                self.empties.push(self.join(e, e, e, e))
+
+        self.empties[usize(level - LEAF)]
+
+    // The node a level down centred on `n`'s centre.
+    centre(*self, n: int) -> int
+        val node = self.node(n)
+
+        if node.level == LEAF + 1 then return self.leaf(carve(self.square(n), 4, 4))
+
+        self.join(self.node(node.nw).se, self.node(node.ne).sw, self.node(node.sw).ne, self.node(node.se).nw)
+
+    // Does all of `n`'s population lie within its centre half?
+    private centred(*self, n: int) -> bool = self.node(self.centre(n)).pop == self.node(n).pop
+
+    // Wrap the root in empty space, a level up and centred where it was.
+    private expand(*self)
+        val r = self.node(self.root)
+        val e = self.empty(r.level - 1)
+
+        self.root = self.join(self.join(e, e, e, r.nw), self.join(e, e, r.ne, e),
+                              self.join(e, r.sw, e, e), self.join(r.se, e, e, e))
+
+    // The centre half of `n`, 2^min(step_log, k - 2) generations on, `k` its level.
+    result(*self, n: int) -> int
+        val node = self.node(n)
+
+        if node.result >= 0 then return node.result
+
+        // `n` and every node this makes on the way are pinned until the result is kept on `n`, so a
+        // sweep in a result below this one leaves them be.
+        val depth = self.pins.len()
+
+        self.pins.push(n)
+
+        if self.node_count() >= self.due then self.sweep()
+
+        val r = if node.pop == 0
+            self.empty(node.level - 1)
+        elif node.level == LEAF + 1
+            self.stepped(n)
+        else
+            self.combined(node)
+
+        self.nodes[usize(n)].result = r
+        self.pins.truncate(depth)
+        r
+    end result
+
+    // A level-5 node or bigger's result, from nine overlapping nodes a level down and four more.
+    private combined(*self, node: Node) -> int
+        val a = self.node(node.nw)
+        val b = self.node(node.ne)
+        val c = self.node(node.sw)
+        val d = self.node(node.se)
+        val nine = [node.nw, self.pin(self.join(a.ne, b.nw, a.se, b.sw)), node.ne,
+                    self.pin(self.join(a.sw, a.se, c.nw, c.ne)), self.pin(self.join(a.se, b.sw, c.ne, d.nw)),
+                    self.pin(self.join(b.sw, b.se, d.nw, d.ne)),
+                    node.sw, self.pin(self.join(c.ne, d.nw, c.se, d.sw)), node.se]
+        val full = self.step_log >= node.level - 2
+        var x: [9]int = [0; 9]
+
+        for i in 0..<9
+            x[i] = self.pin(if full then self.result(nine[i]) else self.centre(nine[i]))
+
+        val nw = self.pin(self.result(self.join(x[0], x[1], x[3], x[4])))
+        val ne = self.pin(self.result(self.join(x[1], x[2], x[4], x[5])))
+        val sw = self.pin(self.result(self.join(x[3], x[4], x[6], x[7])))
+
+        self.join(nw, ne, sw, self.result(self.join(x[4], x[5], x[7], x[8])))
+    end combined
+
+    // Keep `n` from a sweep until the result in progress is done.
+    private pin(*self, n: int) -> int
+        self.pins.push(n)
+        n
+
+    // A level-4 node's result, stepped a generation at a time: the 16×16 square's rows each in the low
+    // bits of a word, as the plane steps its tiles' rows, its centre 8×8 cut out at the end.
+    private stepped(*self, n: int) -> int
+        var rows = self.square(n)
+
+        for g in 0..<(1 << min(self.step_log, 2))
+            var next: [16]u64 = [0; 16]
+
+            for r in 0..<16
+                var w: [9]u64 = [0; 9]
+
+                for dy in -1..1
+                    val mid = if r + dy < 0 || r + dy > 15 then 0 else rows[r + dy]
+                    val i = 3 * (dy + 1)
+
+                    w[i] = mid << 1
+                    w[i + 1] = mid
+                    w[i + 2] = mid >> 1
+
+                next[r] = next_word(self.rule, w) & 0xFFFF
+
+            rows = next
+
+        self.leaf(carve(rows, 4, 4))
+    end stepped
+
+    // A level-4 node's cells, a row of 16 to a word.
+    private square(self, n: int) -> [16]u64
+        val node = self.node(n)
+        val nw = self.node(node.nw).bits
+        val ne = self.node(node.ne).bits
+        val sw = self.node(node.sw).bits
+        val se = self.node(node.se).bits
+        var rows: [16]u64 = [0; 16]
+
+        for r in 0..<8
+            rows[r] = leaf_row(nw, r) | (leaf_row(ne, r) << 8)
+            rows[r + 8] = leaf_row(sw, r) | (leaf_row(se, r) << 8)
+
+        rows
+
+    // The level-4 node holding a square of 16 rows.
+    private of_square(*self, rows: [16]u64) -> int =
+        self.join(self.leaf(carve(rows, 0, 0)), self.leaf(carve(rows, 8, 0)), self.leaf(carve(rows, 0, 8)),
+                  self.leaf(carve(rows, 8, 8)))
+
+    // The node of `level` with north-west corner `x0`, `y0` holding `cells`, which all lie within it.
+    private build(*self, cells: Buf[(i64, i64)], level: int, x0: i64, y0: i64) -> int
+        if cells.len() == 0 then return self.empty(level)
+
+        if level == LEAF
+            var bits: u64 = 0
+
+            for (x, y) in cells
+                bits |= u64(1) << u64((y - y0) * 8 + x - x0)
+
+            return self.leaf(bits)
+
+        val half = i64(1) << i64(level - 1)
+        var nw: Buf[(i64, i64)] = buf()
+        var ne: Buf[(i64, i64)] = buf()
+        var sw: Buf[(i64, i64)] = buf()
+        var se: Buf[(i64, i64)] = buf()
+
+        for (x, y) in cells
+            if y < y0 + half
+                if x < x0 + half then nw.push((x, y)) else ne.push((x, y))
+            elif x < x0 + half
+                sw.push((x, y))
+            else
+                se.push((x, y))
+
+        self.join(self.build(nw, level - 1, x0, y0), self.build(ne, level - 1, x0 + half, y0),
+                  self.build(sw, level - 1, x0, y0 + half), self.build(se, level - 1, x0 + half, y0 + half))
+    end build
+
+    // Replace the universe's cells with `cells`, at generation 0.
+    place(*self, cells: Buf[(i64, i64)])
+        var level = LEAF + 1
+
+        for (x, y) in cells
+            while !within(level, x, y)
+                level += 1
+
+        val half = i64(1) << i64(level - 1)
+
+        self.root = self.build(cells, level, CENTRE_X - half, CENTRE_Y - half)
+        self.generation = 0
+
+    // The universe in Golly's macrocell format: the header, then every node the root reaches, children
+    // before parents, numbered from 1 in the order written, the empty node of any level written as 0.
+    write_mc(self) -> string
+        var lines: Buf[string] = buf()
+        var numbers = buf_filled(self.nodes.len(), -1)
+
+        if self.population() == 0
+            lines.push(s"${self.level()} 0 0 0 0")
+        else
+            self.number(self.root, numbers, lines)
+
+        var text = s"[M2] (automata)\n#R ${self.rule.notation()}\n"
+
+        if self.generation != 0 then text = text + s"#G ${self.generation}\n"
+
+        for i in 0..<lines.len()
+            text = text + lines[i] + "\n"
+
+        text
+
+    private number(self, n: int, numbers: Buf[int], lines: Buf[string]) -> int
+        val node = self.node(n)
+
+        if node.pop == 0 then return 0
+
+        if numbers[usize(n)] > 0 then return numbers[usize(n)]
+
+        val line = if node.level == LEAF
+            leaf_line(node.bits)
+        else
+            val a = self.number(node.nw, numbers, lines)
+            val b = self.number(node.ne, numbers, lines)
+            val c = self.number(node.sw, numbers, lines)
+            val d = self.number(node.se, numbers, lines)
+
+            s"${node.level} ${a} ${b} ${c} ${d}"
+
+        lines.push(line)
+        numbers[usize(n)] = int(lines.len())
+        numbers[usize(n)]
+    end number
+end Universe
+
+// An empty universe under `rule`, or why the rule cannot run under HashLife.
+universe(rule: Rule) -> Result[Universe, string]
+    hashlife_refusal(rule) match
+        Some(why) -> Err(why)
+        None -> Ok(fresh(rule))
+
+// Why `rule` cannot run under HashLife, or nothing if it can: the rules the plane runs can, and no
+// others.
+hashlife_refusal(rule: Rule) -> Option[string]
+    if plane_runs(rule) then return None
+
+    rule match
+        LifeLike(_, _) | Hex(_, _) | Isotropic(_) ->
+            Some(s"${rule.notation()} has B0, which brings every empty cell alive at once: HashLife holds empty space as one shared node, and needs it to stay empty")
+        _ -> Some(s"${rule.notation()} is not a two-state B/S or isotropic rule, the only kinds HashLife runs")
+
+// The universe of `p`'s live cells under `rule`.
+universe_of_plane(rule: Rule, p: Plane) -> Result[Universe, string]
+    var u = universe(rule)?
+
+    u.place(live_cells(p))
+    Ok(u)
+
+// Every live cell of `p`, a tile at a time.
+live_cells(p: Plane) -> Buf[(i64, i64)]
+    var cells: Buf[(i64, i64)] = buf()
+
+    for ((tx, ty), s) in p.tiles
+        for r in 0..<64
+            var w = p.row(s, r)
+
+            while w != 0
+                cells.push((tx * 64 + i64(w.trailing_zeros()), ty * 64 + i64(r)))
+                w &= w - 1
+
+    cells
+
+// An empty universe under `rule`, which is not checked.
+private fresh(rule: Rule) -> Universe
+    var u = Universe(rule, buf(), map(), map(), buf(), 0, 0, 0, NODE_LIMIT, NODE_LIMIT, 0, buf(), buf())
+
+    u.root = u.empty(LEAF + 1)
+    u
+
+// Does a root of `level`, centred where every root is, hold cell `x`, `y`?
+private within(level: int, x: i64, y: i64) -> bool
+    val half = i64(1) << i64(level - 1)
+
+    x >= CENTRE_X - half && x < CENTRE_X + half && y >= CENTRE_Y - half && y < CENTRE_Y + half
+
+// Row `r` of a leaf's cells.
+private leaf_row(bits: u64, r: int) -> u64 = (bits >> u64(8 * r)) & 0xFF
+
+// The 8×8 cells of `rows` with north-west corner `x0`, `y0`, as a leaf's word.
+private carve(rows: [16]u64, x0: int, y0: int) -> u64
+    var bits: u64 = 0
+
+    for r in 0..<8
+        bits |= ((rows[y0 + r] >> u64(x0)) & 0xFF) << u64(8 * r)
+
+    bits
+
+// A leaf as a macrocell line: each row's cells up to its last live one, `.` dead and `*` alive, and a
+// `$` after every row.
+private leaf_line(bits: u64) -> string
+    var line = ""
+
+    for r in 0..<8
+        val row = leaf_row(bits, r)
+
+        for x in 0..<(64 - int(row.leading_zeros()))
+            line = line + (if (row >> u64(x)) & 1 == 1 then "*" else ".")
+
+        line = line + "$"
+
+    line
+
+// Read a two-state macrocell file into a universe. A refusal is a diagnostic whose span points into
+// `text`, on the offending line.
+parse_mc(text: string) -> Result[Universe, Diagnostic]
+    val bytes = text.bytes
+    var u = fresh(LifeLike(0b1000, 0b1100))
+    // The node each line of the tree made, by its number less one.
+    var made: Buf[int] = buf()
+    var start: usize = 0
+    var first = true
+
+    while start < bytes.len
+        var end = start
+
+        while end < bytes.len && bytes[end] != u8('\n')
+            end += 1
+
+        val next = end + 1
+
+        if end > start && bytes[end - 1] == u8('\r') then end -= 1
+
+        val line = text[start..<end]
+
+        if first
+            if !line.starts_with("[M2]") then return Err(error(Span(start, end), "a macrocell file begins with `[M2]`"))
+
+            first = false
+        elif line.len == 0 || line.starts_with("#")
+            header(&u, line, start)?
+        elif line.starts_with(".") || line.starts_with("*") || line.starts_with("$")
+            made.push(u.leaf(read_leaf(line, start)?))
+        elif bytes[start] >= u8('0') && bytes[start] <= u8('9')
+            made.push(read_node(&u, made, line, start)?)
+        else
+            return Err(error(Span(start, end), "expected a leaf of `.`, `*` and `$`, or a node line `level nw ne sw se`"))
+
+        start = next
+
+    if first then return Err(error(Span(0, 0), "a macrocell file begins with `[M2]`"))
+
+    if made.len() > 0
+        val root = made[made.len() - 1]
+
+        u.root = if u.node(root).level == LEAF then u.of_square(centred_square(u.node(root).bits)) else root
+
+    Ok(u)
+end parse_mc
+
+// A `#R` line's rule, a `#G` line's generation, or a comment.
+private header(u: *Universe, line: string, start: usize) -> Result[unit, Diagnostic]
+    if line.starts_with("#R")
+        val text = line[2..<line.len].trim()
+        val at = start + line.len - text.len
+
+        val rule = parse_rule(text).map_err(d -> moved(d, at))?
+
+        hashlife_refusal(rule) match
+            Some(why) -> return Err(error(Span(at, at + text.len), why))
+            None -> u.rule = rule
+    elif line.starts_with("#G")
+        val text = line[2..<line.len].trim()
+        val at = start + line.len - text.len
+
+        parse_int(text) match
+            Ok(g) ->
+                if g < 0 then return Err(error(Span(at, at + text.len), "a generation is not negative"))
+
+                u.generation = i64(g)
+            Err(_) -> return Err(error(Span(at, at + text.len), "expected the generation, a number"))
+
+    Ok(())
+
+// A two-state leaf line's cells.
+private read_leaf(line: string, start: usize) -> Result[u64, Diagnostic]
+    var bits: u64 = 0
+    var x = 0
+    var y = 0
+
+    for i in 0..<line.len
+        val c = line.bytes[i]
+        val at = Span(start + i, start + i + 1)
+
+        if y >= 8 then return Err(error(at, "a leaf has 8 rows, and this one has more"))
+
+        if c == u8('$')
+            x = 0
+            y += 1
+        elif c == u8('.') || c == u8('*')
+            if x >= 8 then return Err(error(at, "a leaf's row is 8 cells, and this one is longer"))
+
+            if c == u8('*') then bits |= u64(1) << u64(y * 8 + x)
+
+            x += 1
+        else
+            return Err(error(at, s"`${char(c)}` is not a cell: a leaf is `.` dead, `*` alive, and `$$` ending a row"))
+
+    Ok(bits)
+
+// A node line, `level nw ne sw se`, its children numbers of the lines before it or 0 for empty.
+private read_node(u: *Universe, made: Buf[int], line: string, start: usize) -> Result[int, Diagnostic]
+    var fields: Buf[(int, Span)] = buf()
+    var i: usize = 0
+
+    while i < line.len
+        var j = i
+
+        while j < line.len && line.bytes[j] != u8(' ')
+            j += 1
+
+        val at = Span(start + i, start + j)
+
+        parse_int(line[i..<j]) match
+            Ok(n) -> fields.push((n, at))
+            Err(_) -> return Err(error(at, "expected a number"))
+
+        i = j + 1
+
+    if fields.len() != 5 then return Err(error(Span(start, start + line.len), "a node line is five numbers: the level and four children"))
+
+    val (level, at) = fields[0]
+
+    if level == 1 then return Err(error(at, "this is a multi-state macrocell file, whose leaves are 2×2 squares of states: only two-state files are read"))
+
+    if level < LEAF + 1 then return Err(error(at, s"a node's level is 4 or more in a two-state file, not ${level}"))
+
+    if level > 62 then return Err(error(at, s"a node's level is at most 62, not ${level}"))
+
+    var kids: [4]int = [0; 4]
+
+    for k in 0..<4
+        val (n, where) = fields[usize(k + 1)]
+
+        if n < 0 || n > int(made.len())
+            return Err(error(where, s"node ${n} is not defined yet: a node names only nodes on the lines before it"))
+
+        kids[k] = if n == 0 then u.empty(level - 1) else made[usize(n - 1)]
+
+        if u.node(kids[k]).level != level - 1
+            return Err(error(where, s"node ${n} is level ${u.node(kids[k]).level}, and a level-${level} node's children are level ${level - 1}"))
+
+    Ok(u.join(kids[0], kids[1], kids[2], kids[3]))
+end read_node
+
+// A leaf's cells in the middle of a 16×16 square.
+private centred_square(bits: u64) -> [16]u64
+    var rows: [16]u64 = [0; 16]
+
+    for r in 0..<8
+        rows[r + 4] = leaf_row(bits, r) << 4
+
+    rows
+
+private moved(d: Diagnostic, by: usize) -> Diagnostic =
+    Diagnostic(d.severity, Span(d.span.start + by, d.span.end + by), d.message, d.label, d.note)

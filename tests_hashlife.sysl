@@ -1,0 +1,619 @@
+@tests
+
+// HashLife, checked cell for cell against the plane it must agree with, against what is known of
+// patterns too big or too long-lived for the plane, against its own promises — equal regions are one
+// node, and the table stays under its limit — and its macrocell reader and writer against Golly's own
+// file and against each other.
+
+import sh.sysl.parsing.Diagnostic
+import sysl.buf.{Buf, buf}
+import sysl.rand.rng
+import sysl.text.{from_utf8, parse_int}
+
+// Golly's `Patterns/HashLife/Constructions/logarithmic-width.mc`, unchanged.
+private val LOG_WIDTH = from_utf8(embed("patterns/logarithmic-width.mc")).unwrap()
+
+private life() -> Rule = parse_rule("B3/S23").unwrap()
+
+private plane_of(rle: string) -> Plane
+    var p = plane()
+
+    parse_rle(rle).unwrap().stamp_origin(&p)
+    p
+
+// Does `u` hold exactly `p`'s cells? The populations agree and every one of `p`'s cells is in `u`.
+private same(u: Universe, p: Plane, what: string)
+    assert_eq(u.population(), i64(p.population()), what)
+
+    for (x, y) in live_cells(p)
+        assert(u.get(x, y), s"${what}: cell ${x}, ${y}")
+
+// Run `rle` under `rule` on the plane and as a universe, comparing them at each of `checks`, which
+// ascend; the universe is advanced by the difference each time, so every step size is exercised.
+private agrees_with_plane(rle: string, rule: Rule, checks: []const int)
+    var p = plane_of(rle)
+    var u = universe_of_plane(rule, p).unwrap()
+    var at = 0
+
+    for i in 0..<checks.len
+        val n = checks[i]
+
+        for g in at..<n
+            p.step(rule)
+
+        u.advance(i64(n - at))
+        at = n
+        assert_eq(u.generation, i64(n))
+        same(u, p, s"generation ${n}")
+
+@test("HashLife runs Life patterns as the plane does, cell for cell, at counts that are not powers of two")
+hashlife_matches_plane()
+    val checks = [1, 2, 3, 5, 8, 13, 64, 100, 257, 500, 777]
+
+    agrees_with_plane(GLIDER, life(), checks)
+    agrees_with_plane(R_PENTOMINO, life(), checks)
+    agrees_with_plane(ACORN, life(), checks)
+    agrees_with_plane(GOSPER_GUN, life(), checks)
+    agrees_with_plane(PULSAR, life(), checks)
+
+@test("HashLife runs other B/S, isotropic and hexagonal rules as the plane does")
+hashlife_matches_plane_rules()
+    val checks = [1, 4, 7, 31, 100, 129, 300]
+
+    agrees_with_plane(R_PENTOMINO, parse_rule("B36/S23").unwrap(), checks)
+    agrees_with_plane(ACORN, parse_rule("B3678/S34678").unwrap(), checks)
+    agrees_with_plane(R_PENTOMINO, parse_rule("B3/S2-i34q").unwrap(), checks)
+    agrees_with_plane(ACORN, parse_rule("B2/S34H").unwrap(), checks)
+
+    // Soups, which keep changing for hundreds of generations under each.
+    for rule in ["B36/S23", "B3678/S34678", "B3/S2-i34q", "B2/S34H", "B2/S"]
+        for seed in 1..3
+            agrees_with_plane(soup(seed), parse_rule(rule).unwrap(), checks)
+
+    agrees_with_plane(from_utf8(embed("patterns/hex-glider.rle")).unwrap(), parse_rule("B2/S34H").unwrap(), checks)
+
+// A 32×32 soup, about a third of it alive, as RLE.
+private soup(seed: int) -> string
+    var r = rng(u64(seed), 1)
+    var text = "x = 32, y = 32\n"
+
+    for y in 0..<32
+        for x in 0..<32
+            text = text + (if r.below(100) < 35 then "o" else "b")
+
+        text = text + (if y == 31 then "!\n" else "$\n")
+
+    text
+
+// The R-pentomino settles at generation 1103 with 116 cells, six of them gliders that have escaped.
+@test("the R-pentomino settles at generation 1103 with 116 cells")
+hashlife_r_pentomino_settles()
+    agrees_with_plane(R_PENTOMINO, life(), [1103])
+
+    var u = universe_of_plane(life(), plane_of(R_PENTOMINO)).unwrap()
+
+    u.advance(1103)
+    assert_eq(u.population(), 116)
+    u.advance(1000)
+    assert_eq(u.population(), 116)
+
+// The Gosper gun has period 30 and sends out one five-cell glider a period, so once its first glider
+// is clear of it its population at generation `t + 30` is its population at `t` plus 5
+// (https://conwaylife.com/wiki/Gosper_glider_gun). 2^20 = 34952 · 30 + 16, so generation 2^20 has
+// (2^20 − 136) / 30 more gliders than generation 136.
+@test("the Gosper gun has its period's population plus a glider a period at generation 2^20")
+hashlife_gosper_gun_population()
+    var p = plane_of(GOSPER_GUN)
+
+    for g in 0..<136
+        p.step(life())
+
+    val at136 = i64(p.population())
+
+    for g in 0..<30
+        p.step(life())
+
+    assert_eq(i64(p.population()), at136 + 5)
+
+    var u = universe_of_plane(life(), plane_of(GOSPER_GUN)).unwrap()
+    val n = i64(1) << 20
+
+    u.advance(n)
+    assert_eq(u.generation, n)
+    assert_eq(u.population(), at136 + 5 * (n - 136) / 30)
+
+// A glider moves a cell diagonally every four generations, so 2^30 generations take it 2^28 cells
+// south-east, in one step.
+@test("a glider jumps 2^30 generations in one step and lands 2^28 cells south-east")
+hashlife_glider_jump()
+    val p = plane_of(GLIDER)
+    var u = universe_of_plane(life(), p).unwrap()
+    val d = i64(1) << 28
+
+    u.jump(30)
+    assert_eq(u.generation, i64(1) << 30)
+    assert_eq(u.population(), 5)
+
+    for (x, y) in live_cells(p)
+        assert(u.get(x + d, y + d), s"cell ${x}, ${y} moved by 2^28")
+
+    // The empty border is trimmed after the step, so the root is no bigger than the glider's distance
+    // from the centre needs.
+    assert(u.level() <= 31, s"the root is level ${u.level()}")
+
+// Exactly `n` generations is the same as the steps of its binary digits taken one at a time.
+@test("a thousand generations at once are a thousand single generations")
+hashlife_advance_is_exact()
+    var a = universe_of_plane(life(), plane_of(ACORN)).unwrap()
+    var b = universe_of_plane(life(), plane_of(ACORN)).unwrap()
+
+    a.advance(1000)
+
+    for i in 0..<1000
+        b.advance(1)
+
+    var q = plane()
+
+    a.cells_into(&q)
+    same(b, q, "1000 at once and 1000 ones")
+
+// 128 × 128 blocks, one to a leaf and each in the same place in it: every leaf is the same leaf and
+// every level one node, so the whole field is a dozen nodes.
+@test("a field of 16384 blocks is a dozen nodes, and a few hundred after a jump")
+hashlife_shares_equal_regions()
+    var cells: Buf[(i64, i64)] = buf()
+
+    for j in 0..<128
+        for i in 0..<128
+            val x = -512 + 8 * i64(i) + 2
+            val y = -511 + 8 * i64(j) + 2
+
+            cells.push((x, y))
+            cells.push((x + 1, y))
+            cells.push((x, y + 1))
+            cells.push((x + 1, y + 1))
+
+    var u = universe(life()).unwrap()
+
+    u.place(cells)
+    assert_eq(u.population(), 4 * 128 * 128)
+    assert_eq(u.level(), 10)
+    assert(u.node_count() <= 12, s"${u.node_count()} nodes")
+    assert(u.get(-510, -509))
+    assert(!u.get(-508, -509))
+
+    // Blocks are still lifes: 2^20 generations later the field is the same. The step's nodes are the
+    // field's edges, corners and overlaps a level at a time, a few hundred, where the field unshared
+    // would be more than 16384 leaves alone.
+    u.jump(20)
+    assert_eq(u.population(), 4 * 128 * 128)
+    assert(u.get(-510, -509))
+    assert(u.node_count() <= 400, s"${u.node_count()} nodes after the jump")
+
+// Under a small node limit the table is swept again and again, in the middle of steps as well as
+// between them, and stays under the limit after every step while the pattern stays right.
+@test("under a 3000-node limit the table is swept, stays under the limit, and the acorn stays right")
+hashlife_node_limit()
+    var p = plane_of(ACORN)
+    var u = universe_of_plane(life(), p).unwrap()
+
+    u.set_limit(3000)
+
+    for round in 0..<50
+        u.advance(100)
+        assert(u.node_count() <= u.limit, s"${u.node_count()} nodes after generation ${u.generation}")
+
+    for g in 0..<5000
+        p.step(life())
+
+    assert(u.collections > 10, s"${u.collections} sweeps")
+    same(u, p, "acorn at 5000 under a 3000-node limit")
+
+// Read, write and read again: the cells, the generation and the rule come back, and the second write
+// is the first.
+@test("a macrocell file written and read back holds the same cells, generation and rule")
+hashlife_mc_round_trip()
+    var u = universe_of_plane(parse_rule("B36/S23").unwrap(), plane_of(GOSPER_GUN)).unwrap()
+
+    u.advance(300)
+
+    val text = u.write_mc()
+    val v = parse_mc(text).unwrap()
+    var q = plane()
+
+    u.cells_into(&q)
+    same(v, q, "read back")
+    assert_eq(v.generation, 300)
+    assert_eq(v.rule.notation(), "B36/S23")
+    assert(text.starts_with("[M2] (automata)\n#R B36/S23\n#G 300\n"), text)
+    assert_eq(v.write_mc(), text)
+
+// An empty universe is one node line of empty children, which reads back empty.
+@test("an empty universe is written as one empty node line and read back empty")
+hashlife_mc_empty()
+    val u = universe(life()).unwrap()
+    val text = u.write_mc()
+
+    assert_eq(text, "[M2] (automata)\n#R B3/S23\n4 0 0 0 0\n")
+    assert_eq(parse_mc(text).unwrap().population(), 0)
+
+// Golly's own sample leaf, a glider, as the whole file: a leaf root is centred where every root is,
+// its north-west cell at (-4, -3).
+@test("a file that is one leaf is centred where every root is")
+hashlife_mc_leaf_root()
+    val u = parse_mc("[M2] (golly 2.0)\n$$..*$...*$.***$$$$\n").unwrap()
+
+    assert_eq(u.population(), 5)
+    assert(u.get(-2, -1))
+    assert(u.get(-1, 0))
+    assert(u.get(-3, 1) && u.get(-2, 1) && u.get(-1, 1))
+    assert_eq(u.rule.notation(), "B3/S23")
+
+// Golly's macrocell numbering: children first, 0 the empty node, the last line the root, whose
+// south-east child's north-west cell is (0, 1).
+@test("macrocell nodes are numbered from 1 in file order, 0 the empty node, the last the root")
+hashlife_mc_numbering()
+    // Node 1 is a leaf with its north-west cell alive, node 2 a level-4 node with node 1 south-east,
+    // node 3 a leaf no node names, and node 4 the root, node 2 in its north-west and south-east.
+    val u = parse_mc("[M2] (golly 2.0)\n#G 12\n*$\n4 0 0 0 1\n$*$\n5 2 0 0 2\n").unwrap()
+
+    assert_eq(u.generation, 12)
+    assert_eq(u.population(), 2)
+    assert_eq(u.level(), 5)
+    // The root spans (-16, -15) to (15, 16); node 2's south-east leaf starts 8 cells into it.
+    assert(u.get(-8, -7))
+    assert(u.get(8, 9))
+
+// Golly's logarithmic-width pattern, whose header gives its own analysis: at generation g(n) the
+// leading puffer is where it was at generation 0, the block is 8n cells east of where it began, and
+// nothing lies between them; g(n) = 240 h(n), h(n) = h(n−1) + h(n−3) + 3 from 0, 1, 3. So at every
+// g(n) every cell of generation 0 is alive again but the block's four, and the block sits alone 8n
+// cells east of them. (Gliders the pushes have sent away are there too, out of the way.) g(23) is
+// generation 5,527,200.
+@test("Golly's logarithmic-width file has its block 8n cells east at each g(n) of its own analysis")
+hashlife_logarithmic_width()
+    var u = parse_mc(LOG_WIDTH).unwrap()
+    var q = plane()
+
+    assert_eq(u.generation, 0)
+    assert_eq(u.rule.notation(), "B3/S23")
+    u.cells_into(&q)
+    assert_eq(u.population(), 4600)
+
+    // The block, at generation 0.
+    val (bx, by) = (1066, 59)
+
+    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)]
+        assert(q.get(bx + dx, by + dy))
+
+    var h: Buf[i64] = buf()
+
+    h.push(0)
+    h.push(1)
+    h.push(3)
+
+    for n in 3..24
+        h.push(h[usize(n - 1)] + h[usize(n - 3)] + 3)
+
+    for n in 1..24
+        u.advance(240 * h[usize(n)] - u.generation)
+
+        var r = plane()
+
+        u.cells_into(&r)
+
+        var gone = 0
+
+        for (x, y) in live_cells(q)
+            if !r.get(x, y)
+                assert(x >= bx && x <= bx + 1 && y >= by && y <= by + 1, s"g(${n}): ${x}, ${y} is not the block's")
+                gone += 1
+
+        assert_eq(gone, 4, s"g(${n})")
+
+        // The block 8n east, and nothing else in the 4×4 square around it.
+        val x0 = bx + 8 * i64(n) - 1
+        var around = 0
+
+        for dy in 0..<4
+            for dx in 0..<4
+                if r.get(x0 + i64(dx), by - 1 + i64(dy)) then around += 1
+
+        assert_eq(around, 4, s"g(${n})")
+
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)]
+            assert(r.get(x0 + 1 + dx, by + dy), s"g(${n}): the block 8n east")
+
+// The file read cell for cell agrees with the plane over its first thousand generations.
+@test("Golly's logarithmic-width file runs as the plane runs it for 1000 generations")
+hashlife_logarithmic_width_matches_plane()
+    val u0 = parse_mc(LOG_WIDTH).unwrap()
+    var p = plane()
+
+    u0.cells_into(&p)
+
+    var u = parse_mc(LOG_WIDTH).unwrap()
+
+    for g in 1..1000
+        p.step(life())
+
+        if g % 120 == 0 || g == 1000
+            u.advance(i64(g) - u.generation)
+            same(u, p, s"generation ${g}")
+
+private refused(text: string) -> Diagnostic =
+    parse_mc(text) match
+        Ok(_) -> panic(s"read: ${text}")
+        Err(d) -> d
+
+private refused_at(text: string, at: string, words: string)
+    val d = refused(text)
+    val start = usize(text.index_of(at).unwrap())
+
+    assert_eq(d.span.start, start, d.message)
+    assert(d.message.contains(words), d.message)
+
+@test("malformed macrocell files are refused at the offending text")
+hashlife_mc_errors()
+    refused_at("#R B3/S23\n4 0 0 0 0\n", "#R", "begins with `[M2]`")
+    refused_at("", "", "begins with `[M2]`")
+    refused_at("[M2]\n..x$\n", "x", "is not a cell")
+    refused_at("[M2]\n.........$\n", ".$", "row is 8 cells")
+    refused_at("[M2]\n$$$$$$$$*\n", "*", "8 rows")
+    refused_at("[M2]\n*$\n4 1 0 0\n", "4 1", "five numbers")
+    refused_at("[M2]\n*$\n4 1 0 x 0\n", "x", "expected a number")
+    refused_at("[M2]\nhello\n", "hello", "expected a leaf")
+    refused_at("[M2]\n#G many\n", "many", "the generation")
+
+@test("a node naming a node not yet defined is refused at the number")
+hashlife_mc_forward_reference()
+    refused_at("[M2]\n*$\n4 1 2 0 0\n", "2 0 0", "not defined yet")
+    // A node naming itself: its own line is not one before it.
+    refused_at("[M2]\n*$\n4 1 0 0 2\n", "2\n", "node 2 is not defined yet")
+
+@test("a child of the wrong size is refused at its number")
+hashlife_mc_wrong_level()
+    val text = "[M2]\n*$\n4 1 0 0 0\n5 1 0 0 0\n"
+    val d = refused(text)
+
+    assert_eq(d.span.start, usize(text.index_of("5 1").unwrap() + 2))
+    assert(d.message.contains("node 1 is level 3"), d.message)
+
+@test("a multi-state macrocell file is refused at its first 2×2 leaf")
+hashlife_mc_multi_state()
+    refused_at("[M2] (golly 2.0)\n#R B3/S23\n1 0 1 0 0\n1 1 0 0 0\n2 1 2 0 0\n", "1 0 1", "multi-state")
+
+@test("a macrocell file under B0, a multi-state rule or an unreadable rule is refused at the rule")
+hashlife_mc_rules_refused()
+    refused_at("[M2]\n#R B03/S23\n", "B03", "has B0")
+    refused_at("[M2]\n#R 345/2/4\n", "345", "not a two-state")
+
+    // A rule that does not read is refused where `parse_rule` says, moved onto its line.
+    val text = "[M2]\n#R B3/Q23\n"
+    val d = refused(text)
+
+    assert(d.span.start >= usize(text.index_of("B3").unwrap()), d.message)
+
+@test("HashLife takes B/S and hexagonal rules and refuses B0 and other kinds, saying why")
+hashlife_refuses_rules()
+    assert(universe(parse_rule("B36/S23").unwrap()).is_ok())
+    assert(universe(parse_rule("B2/S34H").unwrap()).is_ok())
+
+    universe(parse_rule("B0/S8").unwrap()) match
+        Ok(_) -> panic("B0 ran")
+        Err(why) -> assert(why.contains("has B0"), why)
+
+    universe(parse_rule("W110").unwrap()) match
+        Ok(_) -> panic("W110 ran")
+        Err(why) -> assert(why.contains("not a two-state"), why)
+
+// A universe drawn through a window keeps only the cells inside it.
+@test("a window draws only the cells inside it")
+hashlife_window()
+    val u = universe_of_plane(life(), plane_of(PULSAR)).unwrap()
+    var all = plane()
+    var part = plane()
+
+    u.cells_into(&all)
+    u.window_into(&part, 0, 0, 100, 100)
+
+    var inside = 0
+
+    for (x, y) in live_cells(all)
+        if x >= 0 && y >= 0
+            assert(part.get(x, y))
+            inside += 1
+
+    assert_eq(part.population(), inside)
+    assert(inside > 0 && inside < all.population())
+
+// -- the universe edited -------------------------------------------------------------------------------
+
+@test("a cell set far outside the root grows the root to reach it, and cleared again it is gone")
+hashlife_set()
+    var u = universe(life()).unwrap()
+
+    u.set(3, 4, true)
+    assert(u.get(3, 4))
+    assert_eq(u.population(), 1)
+    u.set(-1_000_000, 5_000_000, true)
+    assert(u.get(-1_000_000, 5_000_000))
+    assert_eq(u.population(), 2)
+    assert_eq(u.bounds(), Some((-1_000_000, 4, 3, 5_000_000)))
+    u.set(3, 4, false)
+    assert(!u.get(3, 4))
+    assert_eq(u.population(), 1)
+
+    // Cells set one at a time run as the same cells placed at once.
+    var v = universe(life()).unwrap()
+
+    for (x, y) in live_cells(plane_of(R_PENTOMINO))
+        v.set(x, y, true)
+
+    v.advance(200)
+
+    var q = plane_of(R_PENTOMINO)
+
+    for g in 0..<200
+        q.step(life())
+
+    same(v, q, "set cell by cell")
+
+@test("the universe's box is the plane's, and nothing for an empty universe")
+hashlife_bounds()
+    assert(universe(life()).unwrap().bounds().is_none())
+
+    for rle in [GLIDER, R_PENTOMINO, GOSPER_GUN, PULSAR]
+        var p = plane_of(rle)
+        var u = universe_of_plane(life(), p).unwrap()
+
+        u.advance(77)
+
+        for g in 0..<77
+            p.step(life())
+
+        assert_eq(u.bounds(), p.bounds())
+
+@test("a new rule forgets the results kept under the old one")
+hashlife_new_rule()
+    var u = universe_of_plane(life(), plane_of(R_PENTOMINO)).unwrap()
+    var p = plane_of(R_PENTOMINO)
+    val highlife = parse_rule("B36/S23").unwrap()
+
+    // The R-pentomino's start has been stepped under Life, and its results kept.
+    u.advance(64)
+    u = universe_of_plane(life(), plane_of(R_PENTOMINO)).unwrap()
+    u.advance(64)
+    u.use_rule(highlife)
+    u.advance(64)
+
+    for g in 0..<64
+        p.step(life())
+
+    for g in 0..<64
+        p.step(highlife)
+
+    same(u, p, "64 under Life, then 64 under HighLife")
+
+// -- the viewer under HashLife --------------------------------------------------------------------------
+
+private model_with(args: []string) -> &Model = model_of(options(args).unwrap()).unwrap()
+
+@test("--hashlife runs the viewer's plane as the plane's own step does, a generation or 2^j at a time")
+hashlife_model_runs()
+    val plain = model_with(["automata", "--pattern", "2"])
+    val fast = model_with(["automata", "--pattern", "2", "--hashlife"])
+
+    assert(fast.hashlife_on())
+    assert(!plain.hashlife_on())
+
+    for n in [1, 7, 100]
+        plain.advance(n)
+        fast.advance(n)
+        assert_eq(fast.generation.read(), plain.generation.read())
+        same(fast.universe, plain.plane, s"generation ${plain.generation.read()}")
+
+@test("--step makes each of HashLife's steps 2^j generations")
+hashlife_model_step()
+    val plain = model_with(["automata", "--pattern", "3"])
+    val jumping = model_with(["automata", "--pattern", "3", "--hashlife", "--step", "5"])
+
+    jumping.advance(3)
+    plain.advance(96)
+    assert_eq(jumping.generation.read(), 96)
+    same(jumping.universe, plain.plane, "the acorn at 96")
+    assert(status(jumping).contains("HashLife 2^5"), status(jumping))
+
+    jumping.step_size(99)
+    assert_eq(jumping.step_log, MOST_JUMP)
+    jumping.step_size(-3)
+    assert_eq(jumping.step_log, 0)
+
+    assert(options(["automata", "--step", "41"]).unwrap_err().contains("2^0 to 2^40"))
+    assert(options(["automata", "--step", "x"]).unwrap_err().contains("not a number"))
+
+@test("under HashLife a tap edits the universe, and the board shows the universe's cells under it")
+hashlife_model_toggle()
+    val m = model_with(["automata", "--pattern", "1", "--hashlife"])
+    val before = m.universe.population()
+
+    m.toggle(5000, -7000)
+    assert(m.universe.get(5000, -7000))
+    assert_eq(m.universe.population(), before + 1)
+
+    m.show(4990, -7010, 20, 20)
+    assert(m.plane.get(5000, -7000))
+    assert_eq(m.plane.population(), 1)
+
+    m.toggle(5000, -7000)
+    assert_eq(m.universe.population(), before)
+    m.show(4990, -7010, 20, 20)
+    assert_eq(m.plane.population(), 0)
+
+@test("HashLife turns off with every cell back on the plane, and turns on only on the plane")
+hashlife_model_switch()
+    val m = model_with(["automata", "--pattern", "4", "--hashlife"])
+
+    m.advance(200)
+    m.use_hashlife(false)
+    assert(!m.hashlife_on())
+
+    var p = plane_of(GOSPER_GUN)
+
+    for g in 0..<200
+        p.step(life())
+
+    assert_eq(m.plane.population(), p.population())
+
+    for (x, y) in live_cells(p)
+        assert(m.plane.get(x, y))
+
+    val grid = model_with(["automata", "--pattern", "4", "--torus"])
+
+    grid.use_hashlife(true)
+    assert(!grid.hashlife_on())
+    assert(grid.message.read().contains("runs on the unbounded plane"), grid.message.read())
+    assert(model_of(options(["automata", "--torus", "--hashlife"]).unwrap()).unwrap_err().contains("unbounded plane"))
+
+    // Onto a torus and back: the grid takes the cells in its region from the universe, and HashLife
+    // resumes from them.
+    m.use_hashlife(true)
+    m.advance(2000)
+
+    val before = m.universe.population()
+
+    m.cycle_edges()
+    assert(!m.hashlife_on())
+
+    // By generation 2200 the gun's first gliders have left the 192×144 grid's region.
+    val said = m.message.read()
+    val dropped = parse_int(said[0..<said.index_of(" ").unwrap()]).unwrap()
+
+    assert(said.contains("were dropped"), said)
+    assert_eq(i64(m.grid.population() + dropped), before)
+
+    m.cycle_edges()
+    m.cycle_edges()
+    assert(m.hashlife_on())
+    assert_eq(m.universe.population(), i64(m.grid.population()))
+
+@test("a macrocell file runs under HashLife at its own generation and rule, and refuses grid options")
+hashlife_model_macrocell()
+    val m = model_with(["automata", "--pattern", "patterns/logarithmic-width.mc"])
+
+    assert(m.hashlife_on())
+    assert_eq(m.universe.population(), 4600)
+    assert_eq(m.generation.read(), 0)
+    assert(status(m).contains("pop 4600"), status(m))
+
+    val h = model_with(["automata", "--pattern", "patterns/logarithmic-width.mc", "--rule", "B36/S23"])
+
+    assert_eq(h.rule.notation(), "B36/S23")
+    assert_eq(h.universe.rule.notation(), "B36/S23")
+
+    val no = (args: []string) ->model_of(options(args).unwrap()).unwrap_err()
+
+    assert(no(["automata", "--pattern", "patterns/logarithmic-width.mc", "--torus"]).contains("unbounded universe"))
+    assert(no(["automata", "--pattern", "patterns/logarithmic-width.mc", "--rule", "B0/S"]).contains("has B0"))
+    assert(no(["automata", "--pattern", "patterns/logarithmic-width.mc", "--rule-file", "rules/Life.rule"]).contains("not a rule file"))
+    assert(no(["automata", "--pattern", "patterns/nothing.mc"]).contains("patterns/nothing.mc"))

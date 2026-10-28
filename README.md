@@ -3,7 +3,7 @@
 Cellular automata in [sysl](https://github.com/sysl-lang/sysl): a bit-packed grid that steps
 64 cells per machine word, any rule written in B/S, Hensel, Generations or Larger than Life notation,
 Wolfram's elementary rules, MCell's cyclic, Vote for Life, Weighted Life, Margolus, 1-D binary and
-1-D totalistic rules, Golly rule tables, RLE and MCell patterns, and a
+1-D totalistic rules, Golly rule tables, HashLife, RLE, MCell and Golly macrocell patterns, and a
 [syslUI](https://github.com/sysl-lang/syslui) viewer.
 
 ![The Gosper glider gun after 60 generations](shot.png)
@@ -52,6 +52,48 @@ isotropic rules, from soups and from the R-pentomino, acorn and gun, centred on 
 negative coordinates and 2⁴⁰ cells out — and check they agree cell for cell; run a glider 10 000
 generations in each of the four directions to exactly where it should be on at most four tiles; and
 check tiles are given back and their slots reused.
+
+## HashLife
+
+`--hashlife`, or `h` in the viewer, runs the plane under **HashLife**, Gosper's algorithm
+(`hashlife.sysl`). The universe is a quadtree whose equal subtrees are one node, looked up in a table
+as they are made; its leaves are 8×8 squares, a word apiece, and a level-4 node's 16×16 square is
+stepped through the plane's own word step. Each node keeps its **result** — its centre half
+2^(k−2) generations on — so a region that recurs anywhere, at any time, is worked out once. A step
+is 2^j generations: `--step <j>`, or `[` and `]` in the viewer, from 2^0 to 2^40, and the status line
+says which. A node too big for the step takes its result at that pace instead, so any count of
+generations is the sum of its binary digits' steps.
+
+The rules are the plane's — B/S, hexagonal and isotropic, **without B0**: HashLife holds all of empty
+space as one shared node, and B0 would make it change. Every other rule is refused with that reason.
+
+Memory is bounded by a node limit (2^21 nodes). When a result is about to be computed and the table
+is full, the nodes still needed — those the root reaches, and those every result in progress holds,
+kept on a stack of pins — are marked, and the rest are swept onto a free list and out of the lookup
+tables, mid-step as well as between steps. Node numbers never change, so a sweep needs no renumbering.
+
+The board draws only the cells under it, copied from the universe onto the plane when the view or the
+universe changes, so a universe of hundreds of millions of cells draws as fast as a glider. The Gosper
+gun runs to generation 2^30 (179 million cells) in a single step in 0.04 s.
+
+**Macrocell files** (`.mc`) are read and written as [Golly documents
+them](https://golly.sourceforge.io/Help/formats.html#mc): the `[M2]` line, `#R` the rule, `#G` the
+generation, then the tree children first, a leaf as 8 rows of `.` and `*` each ended by `$`, a node as
+`level nw ne sw se` numbering the lines before it from 1, `0` the empty node, the last line the root,
+whose south-east child's north-west cell is (0, 1). `--pattern <file.mc>` runs one under HashLife,
+fitted to the view. Multi-state files (leaves `1 a b c d`), forward references, children of the wrong
+size and rules HashLife cannot run are refused with a diagnostic at the offending text.
+
+The bundled `patterns/logarithmic-width.mc` is Golly's: Jason Summers and Gabriel Nivasch's pattern
+whose diameter grows logarithmically, with Dean Hickerson's analysis in its header.
+
+The tests run HashLife beside the plane cell for cell — Life patterns and soups under five rules,
+hexagonal and isotropic among them, at counts that are not powers of two; check the R-pentomino settles
+at 116 cells at generation 1103, the Gosper gun's population at 2^20 against its period-30 glider count,
+and a glider 2^28 cells away after a single 2^30 step; count the nodes of a field of 16384 identical
+blocks; run under a 3000-node limit; check the logarithmic-width file against its own analysis — the
+block 8n cells east at every g(n), to generation 5 527 200 — and against the plane; and read, write
+and read macrocell files and their refusals.
 
 The tests hold a naive cell-by-cell step as the oracle, and the fast step must agree with it bit for
 bit on random grids under six rules, six widths (1, 5, 63, 64, 65, 130) and both edge modes.
@@ -358,6 +400,8 @@ acorn, Gosper glider gun and pulsar; two Brian's Brain spaceships head on (`/2/3
 | `r` / `c` | random fill (every colour under a cyclic rule) / clear |
 | `t` | plane → torus → bounded → plane (torus / bounded under a rule the plane cannot run) |
 | `f` | fit the view to the pattern (on the grid, to the whole grid) |
+| `h` | HashLife on / off (on the plane) |
+| `[` / `]` | HashLife's step: half / twice as many generations |
 | `1`–`4` | Life, HighLife, Seeds, Day & Night |
 | `5`–`9` | the first five bundled patterns |
 | `0` | the next of the others: Brian's Brain, Star Wars, Rule 110 |
@@ -383,7 +427,10 @@ ISC — see `LICENSE`. `patterns/bosco.rle`, `patterns/majority.rle` and `patter
 `rules/Langtons-Ant.rule`, `rules/LangtonsAnt_LLRR.rule` and `rules/Turmite_180121020081.rule` are
 Golly's own files, unchanged but for a description naming their source; Golly is Copyright © 2005–2026
 The Golly Gang and free software under the GNU General Public License, version 2 or later, and these
-three files are distributed under those terms, not ISC. `rules/Immigration.rule` and
+three files are distributed under those terms, not ISC. `patterns/logarithmic-width.mc` is Golly's
+own file too, unchanged (`Patterns/HashLife/Constructions/logarithmic-width.mc`), by Jason Summers
+and Gabriel Nivasch with Dean Hickerson's analysis, as its `#C` lines say, and is likewise distributed
+under the GNU General Public License, version 2 or later, not ISC. `rules/Immigration.rule` and
 `rules/QuadLife.rule` are LifeWiki's (`Rule:Immigration` and `Rule:QuadLife` at conwaylife.com),
 unchanged but for a description naming their source; LifeWiki's content is available under the GNU
 Free Documentation License 1.2, and these two files are distributed under those terms, not ISC; the
