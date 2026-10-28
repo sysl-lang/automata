@@ -75,12 +75,27 @@ struct Model
     window: (i64, i64, i64, i64)
     // Each step HashLife takes is 2^`step_log` generations.
     step_log: int
+    // Whether the HashLife that runs is the generic one, for a rule the plane cannot run: `hashed` holds
+    // the cells, the plane stays empty, and the board draws `sheet`, the window under it flattened into
+    // a grid with every cell's state. The grid holds the cells while HashLife is off, and is where they
+    // come from and go back to.
+    multi: bool
+    hashed: MultiUniverse
+    sheet: Grid
 
     // Something the status line shows has changed.
     touched(*self) = self.generation.set(self.generation.read())
 
     // Is HashLife what runs?
     hashlife_on(self) -> bool = self.on_plane && self.hashlife
+
+    // Is it the generic HashLife?
+    multi_on(self) -> bool = self.hashlife_on() && self.multi
+
+    // HashLife's population and box, whichever universe runs.
+    hashed_population(self) -> i64 = if self.multi then self.hashed.population() else self.universe.population()
+
+    hashed_bounds(self) -> Option[(i64, i64, i64, i64)] = if self.multi then self.hashed.bounds() else self.universe.bounds()
 
     advance(*self, n: int)
         if self.on_plane && self.hashlife
@@ -94,10 +109,16 @@ struct Model
 
     // `n` of HashLife's steps.
     private advance_hashlife(*self, n: int)
-        self.universe.set_step(self.step_log)
+        if self.multi
+            self.hashed.set_step(self.step_log)
 
-        for i in 0..<n
-            self.universe.step()
+            for i in 0..<n
+                self.hashed.step()
+        else
+            self.universe.set_step(self.step_log)
+
+            for i in 0..<n
+                self.universe.step()
 
         self.shown = false
         self.generation.set(self.generation.read() + (i64(n) << i64(self.step_log)))
@@ -105,17 +126,29 @@ struct Model
     // Under HashLife, the universe made again from the plane, which has just been given a whole new
     // set of cells.
     replant(*self)
-        if self.on_plane && self.hashlife
+        if self.multi_on()
+            self.hashed = multi_universe_of_grid(self.rule, self.grid, self.grid.width / 2, self.grid.height / 2).unwrap()
+            self.shown = false
+        elif self.on_plane && self.hashlife
             self.universe = universe_of_plane(self.rule, self.plane).unwrap()
             self.shown = false
 
-    // Draw the universe's cells from `west`, `north`, `across` by `down`, onto the plane, unless the
-    // plane already holds them.
+    // Draw the universe's cells from `west`, `north`, `across` by `down`, onto the plane — or under the
+    // generic HashLife onto the sheet — unless it already holds them.
     show(*self, west: i64, north: i64, across: i64, down: i64)
         if self.shown && self.window == (west, north, across, down) then return
 
-        self.plane.clear()
-        self.universe.window_into(&self.plane, west, north, west + across - 1, north + down - 1)
+        if self.multi
+            if self.sheet.width != int(across) || self.sheet.height != int(down)
+                self.sheet = grid(int(across), int(down), Bounded)
+            else
+                self.sheet.clear()
+
+            self.hashed.window_into(&self.sheet, west, north)
+        else
+            self.plane.clear()
+            self.universe.window_into(&self.plane, west, north, west + across - 1, north + down - 1)
+
         self.window = (west, north, across, down)
         self.shown = true
 
@@ -137,11 +170,41 @@ struct Model
         self.rule_text.set(u.rule.notation())
         self.generation.set(u.generation)
 
+    // Start with the multi-state universe `u` under the generic HashLife, at its own generation.
+    start_hashed(*self, u: MultiUniverse)
+        self.on_plane = true
+        self.hashlife = true
+        self.multi = true
+        self.hashed = u
+        self.shown = false
+        self.plane.clear()
+        self.rule = u.rule
+        self.rule_text.set(u.rule.notation())
+        self.generation.set(u.generation)
+
+    // Move the grid's cells into the generic HashLife, the grid's centre on the origin and the view
+    // where it was. The rule must be one `multi_refusal` takes.
+    to_hashed(*self)
+        self.on_plane = true
+        self.hashlife = true
+        self.multi = true
+        self.plane.clear()
+        self.replant()
+        self.cx = -i64(self.grid.width / 2)
+        self.cy = -i64(self.grid.height / 2)
+        self.message.set(s"HashLife for every state: a step is 2^${self.step_log} generations")
+
     // Run the plane under HashLife, or under its own step, or say why HashLife cannot run. Off, every
-    // cell goes back onto the plane, unless there are more than the plane should be asked to hold.
+    // cell goes back onto the plane, unless there are more than the plane should be asked to hold. A
+    // rule the plane cannot run goes to the generic HashLife from the grid, and back onto a torus.
     use_hashlife(*self, on: bool)
         if !on
             if !self.hashlife_on() then return
+
+            if self.multi
+                self.to_grid(Torus)
+                self.message.set(s"HashLife off: on a torus, ${self.grid.width}×${self.grid.height}")
+                return
 
             if self.universe.population() > PLANE_MOST
                 self.message.set(s"${self.universe.population()} cells are more than the plane holds: HashLife stays on")
@@ -151,6 +214,8 @@ struct Model
             self.universe.cells_into(&self.plane)
             self.hashlife = false
             self.message.set("HashLife off: the plane steps a generation at a time")
+        elif !self.on_plane && !plane_runs(self.rule)
+            if any_hashlife_refusal(self.rule) is Some(why) then self.message.set(why) else self.to_hashed()
         elif !self.on_plane
             self.message.set("HashLife runs on the unbounded plane: t moves onto it")
         else
@@ -184,7 +249,7 @@ struct Model
     load(*self, p: Pattern)
         if p.rule is Some(r) then self.leave_plane_for(r)
 
-        if self.on_plane
+        if self.on_plane && !self.multi_on()
             self.plane.clear()
             p.stamp_origin(&self.plane)
         else
@@ -202,7 +267,7 @@ struct Model
 
     // Every cell dead.
     clear(*self)
-        if self.on_plane then self.plane.clear() else self.grid.clear()
+        if self.on_plane && !self.multi_on() then self.plane.clear() else self.grid.clear()
 
         self.generation.set(0)
         self.replant()
@@ -212,13 +277,17 @@ struct Model
         // A cyclic rule starts from every colour at once, as MCell's cyclic rules want.
         if self.rule is Cyclic(c) then self.grid.randomize_states(&self.random, c.states) else self.grid.randomize(&self.random, 30)
 
-        if self.on_plane then self.copy_to_plane()
+        if self.multi_on() then self.replant() elif self.on_plane then self.copy_to_plane()
 
         self.generation.set(0)
 
-    // Flip the cell at `x`, `y` of the view's own coordinates: the grid's, or the plane's.
+    // Flip the cell at `x`, `y` of the view's own coordinates: the grid's, or the plane's. Under the
+    // generic HashLife a cell in any state goes to 0, and one in 0 to 1.
     toggle(*self, x: i64, y: i64)
-        if self.hashlife_on()
+        if self.multi_on()
+            self.hashed.set(x, y, if self.hashed.get(x, y) == 0 then 1 else 0)
+            self.shown = false
+        elif self.hashlife_on()
             self.universe.set(x, y, !self.universe.get(x, y))
             self.shown = false
         elif self.on_plane
@@ -262,7 +331,24 @@ struct Model
         val g = self.grid
         val left = i64(g.width / 2)
         val top = i64(g.height / 2)
-        val before = if self.hashlife_on() then self.universe.population() else i64(self.plane.population())
+        val before = if self.hashlife_on() then self.hashed_population() else i64(self.plane.population())
+
+        // The generic HashLife's cells go straight onto the grid, each in its state.
+        if self.multi_on()
+            self.grid.clear()
+            self.grid.edges = edges
+            self.hashed.window_into(&self.grid, -left, -top)
+            self.ox += real(-left - self.cx) * self.zoom
+            self.oy += real(-top - self.cy) * self.zoom
+            self.on_plane = false
+            self.hashlife = false
+            self.multi = false
+
+            val dropped = before - i64(self.grid.population())
+
+            if dropped > 0 then self.message.set(s"${dropped} cells beyond the ${g.width}×${g.height} grid were dropped")
+
+            return
 
         // Under HashLife the plane holds only what was on the board: the grid's region is drawn onto it.
         if self.hashlife_on()
@@ -285,9 +371,13 @@ struct Model
 
         if dropped > 0 then self.message.set(s"${dropped} cells beyond the ${g.width}×${g.height} grid were dropped")
 
-    // Leave the plane for a torus if `rule` cannot run on it.
+    // Leave the plane for a torus if `rule` cannot run on it. The generic HashLife is left for any new
+    // rule, whose states its cells may not have.
     private leave_plane_for(*self, rule: Rule)
-        if self.on_plane && !plane_runs(rule)
+        if self.multi_on()
+            self.to_grid(Torus)
+            self.message.set(s"${rule.notation()}: HashLife off, on a torus — h runs it under HashLife again")
+        elif self.on_plane && !plane_runs(rule)
             self.to_grid(Torus)
             self.message.set(s"${rule.notation()} cannot run on the unbounded plane: on a torus instead")
 
@@ -320,7 +410,7 @@ end Model
 model(g: Grid, rule: Rule) -> &Model =
     Model(g, plane(), false, rule, false, 3, 4.0, 0.0, 0.0, 0, 0, false, false, 0.0, false, 0, rng(1, 1),
           signal(0), signal(rule.notation()), signal(""), false, universe(LifeLike(0b1000, 0b1100)).unwrap(), false,
-          (0, 0, 0, 0), 0)
+          (0, 0, 0, 0), 0, false, multi_universe(LifeLike(0b1000, 0b1100)).unwrap(), grid(1, 1, Bounded))
 
 // The whole window: the board, then the status line and the rule field under it.
 screen(m: &Model) -> &View =
@@ -353,11 +443,11 @@ status(m: &Model) -> string
     val state = if m.running then s"${SPEEDS[m.speed]}/s" else "paused"
 
     if m.hashlife_on()
-        val box = m.universe.bounds() match
+        val box = m.hashed_bounds() match
             Some((west, north, east, south)) -> s"${east - west + 1}×${south - north + 1} at ${west}, ${north}"
             None -> "empty"
 
-        return s"gen ${m.generation.read()}   pop ${m.universe.population()}   ${m.rule.notation()}   HashLife 2^${m.step_log}   box ${box}   ${state}"
+        return s"gen ${m.generation.read()}   pop ${m.hashed_population()}   ${m.rule.notation()}   HashLife 2^${m.step_log}   box ${box}   ${state}"
 
     if m.on_plane
         val box = m.plane.bounds() match
@@ -499,6 +589,9 @@ private paint_plane(m: &Model, c: *Canvas, r: Rect)
 
     if m.hashlife_on() then m.show(west, m.cy, across, i64(down))
 
+    // Under the generic HashLife the plane is empty and the sheet holds the window.
+    if m.multi_on() then paint_sheet(m, c, r, left, top, gap)
+
     val p = m.plane
     var slots: Buf[int] = buf()
     var band = i64(0)
@@ -565,6 +658,35 @@ private paint_plane(m: &Model, c: *Canvas, r: Rect)
         m.oy = real(py) - real(r.y) - ay * next
 end paint_plane
 
+// The sheet drawn into the board from its corner cell at `left`, `top`, as the grid is drawn: a table's
+// state 0 in its own colour first, then each row's runs of one state as one rectangle apiece.
+private paint_sheet(m: &Model, c: *Canvas, r: Rect, left: real, top: real, gap: int)
+    val g = m.sheet
+    val z = m.zoom
+
+    if m.rule is Table(t) then c.fill(r, t.colours[0])
+
+    for y in 0..<g.height
+        val py = int(top + real(y) * z)
+        val h = max(1, int(top + real(y + 1) * z) - py - gap)
+        var x = 0
+
+        while x < g.width
+            val state = g.state(x, y)
+
+            if state != 0
+                val start = x
+
+                while x < g.width && g.state(x, y) == state
+                    x += 1
+
+                val px = int(left + real(start) * z)
+
+                c.fill(Rect(px, py, max(1, int(left + real(x) * z) - px - gap), h), colour_of(m.rule, state))
+            else
+                x += 1
+end paint_sheet
+
 // Cells `start ..< end` of a row drawn as one rectangle, the plane's columns counted from the corner
 // cell at `left`.
 private fill_run(c: *Canvas, m: &Model, left: real, py: int, h: int, gap: int, start: i64, end: i64)
@@ -581,7 +703,7 @@ private below(n: i64) -> u64 = if n <= 0 then 0 elif n >= 64 then ~u64(0) else (
 // The view zoomed and moved so the live cells' box fills the board with a cell to spare round it; on
 // an empty plane, the first frame's view.
 private fit_plane(m: &Model, r: Rect)
-    val box = if m.hashlife_on() then m.universe.bounds() else m.plane.bounds()
+    val box = if m.hashlife_on() then m.hashed_bounds() else m.plane.bounds()
 
     box match
         Some((west, north, east, south)) ->

@@ -14,7 +14,10 @@
 // size, and on the plane the size of the region the first view shows.
 //
 // `--hashlife` runs the plane under HashLife, each step 2^`j` generations by `--step` (0 unless
-// given); a Golly macrocell file (`.mc`) always runs under it. `--generations` counts steps then.
+// given); a Golly macrocell file (`.mc`) always runs under it. `--generations` counts steps then. A
+// rule the plane cannot run — a rule table, Generations, MCell's radius-1 families — runs under the
+// generic, multi-state HashLife instead, on an unbounded universe, unless `--torus` or `--bounded` asked
+// for the grid.
 //
 // `--shot` draws one frame with no window at all, after running the pattern for a fixed number of
 // generations, and writes it to a PNG: syslUI rasterizes into a PlutoVG surface either way, and the
@@ -81,15 +84,25 @@ end main
 // a macrocell file. `program` is the path the program was run by, which rule files are looked for
 // beside.
 model_of(o: Options, program: string) -> Result[&Model, string]
-    val m = if o.pattern.ends_with(".mc") then macrocell_model(o)? else pattern_model(o, program)?
+    val m = if o.pattern.ends_with(".mc") then macrocell_model(o, program)? else pattern_model(o, program)?
 
     m.step_log = o.step
 
     if o.hashlife && !m.hashlife
-        if !m.on_plane then return Err("--hashlife runs on the unbounded plane, and this starts on a grid")
+        // A rule the plane cannot run goes from the grid to the generic HashLife, unless the grid was
+        // asked for.
+        if !m.on_plane && (o.edged || plane_runs(m.rule)) then return Err("--hashlife runs on the unbounded plane, and this starts on a grid")
 
-        m.hashlife = true
-        m.replant()
+        if !m.on_plane
+            if any_hashlife_refusal(m.rule) is Some(why) then return Err(s"--hashlife: ${why}")
+
+            val name = m.message.read()
+
+            m.to_hashed()
+            m.message.set(name)
+        else
+            m.hashlife = true
+            m.replant()
 
     Ok(m)
 
@@ -114,12 +127,15 @@ private pattern_model(given: Options, program: string) -> Result[&Model, string]
 
 // The model for a Golly macrocell file: its universe under HashLife, on the plane, under its own rule
 // or the one `--rule` gives.
-private macrocell_model(o: Options) -> Result[&Model, string]
+private macrocell_model(o: Options, program: string) -> Result[&Model, string]
     if o.edged then return Err("a macrocell file is an unbounded universe: --torus and --bounded do not apply")
 
-    if o.rule_file != "" then return Err("a macrocell file runs under HashLife, which takes a B/S or isotropic rule, not a rule file")
-
     val text = read_text(o.pattern).map_err(e -> s"${o.pattern}: ${e}")?
+
+    if is_multi_mc(text) then return multi_macrocell_model(o, text, rule_dirs(o.rules_dir, program))
+
+    if o.rule_file != "" then return Err("a two-state macrocell file runs under HashLife, which takes a B/S or isotropic rule, not a rule file")
+
     var u = parse_mc(text).map_err(d -> s"${o.pattern} is not a macrocell file this can read\n${d.render(source_of(o.pattern, text))}")?
 
     if o.rule != ""
@@ -135,6 +151,42 @@ private macrocell_model(o: Options) -> Result[&Model, string]
     m.placed = true
     m.fitting = true
     Ok(m)
+
+// The model for a multi-state macrocell file: its universe under the generic HashLife, under the rule
+// its `#R` line names, read as `--rule` reads one, or the one `--rule` or `--rule-file` gives.
+private multi_macrocell_model(o: Options, text: string, dirs: Buf[string]) -> Result[&Model, string]
+    var u = parse_multi_mc(text, name -> rule_named(name, dirs)).map_err(d -> s"${o.pattern} is not a macrocell file this can read\n${d.render(source_of(o.pattern, text))}")?
+
+    if o.rule != "" && o.rule_file != "" then return Err("--rule and --rule-file both give the rule; give one")
+
+    if o.rule != "" || o.rule_file != ""
+        val rule = if o.rule != "" then rule_named(o.rule, dirs).map_err(why -> s"--rule: ${why}")? else Table(parse_rule_file(read_text(o.rule_file).map_err(e -> s"${o.rule_file}: ${e}")?).map_err(d -> s"${o.rule_file} is not a rule file this can read: ${d.message}")?)
+
+        if multi_refusal(rule) is Some(why) then return Err(s"--rule: ${why}")
+
+        if int(u.most_state()) >= rule.states()
+            return Err(s"the universe has cells in state ${u.most_state()}, and ${rule.notation()}'s states are 0 to ${rule.states() - 1}")
+
+        u.use_rule(rule)
+
+    val m = model(grid(o.width, o.height, Torus), u.rule)
+
+    m.start_hashed(u)
+    m.message.set(o.pattern)
+    // The first frame fits the universe, which may lie anywhere.
+    m.placed = true
+    m.fitting = true
+    Ok(m)
+
+// The rule `name` gives: a notation, or else the rule file `<name>.rule` in `dirs`.
+private rule_named(name: string, dirs: Buf[string]) -> Result[Rule, string]
+    parse_rule(name) match
+        Ok(r) -> return Ok(r)
+        Err(d) -> if !names_a_rule(name) then return Err(s"`${name}` is not a rule: ${d.message}")
+
+    find_rule(name, dirs)? match
+        Some(t) -> Ok(Table(t))
+        None -> Err(s"the rule is `${name}`, which is ${not_found(name, dirs)}")
 
 // Whether to start on the unbounded plane: under a rule that can run there, unless `--torus` or
 // `--bounded` asked for a grid, or an MCell file's `#WRAP` said whether its board wraps.

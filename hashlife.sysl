@@ -802,7 +802,7 @@ private read_node(u: *Universe, made: Buf[int], line: string, start: usize) -> R
 
     val (level, at) = fields[0]
 
-    if level == 1 then return Err(error(at, "this is a multi-state macrocell file, whose leaves are 2×2 squares of states: only two-state files are read"))
+    if level == 1 then return Err(error(at, "this is a multi-state macrocell file, whose leaves are 2×2 squares of states: `parse_multi_mc` reads it, and this reader only two-state files"))
 
     if level < LEAF + 1 then return Err(error(at, s"a node's level is 4 or more in a two-state file, not ${level}"))
 

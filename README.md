@@ -65,7 +65,8 @@ says which. A node too big for the step takes its result at that pace instead, s
 generations is the sum of its binary digits' steps.
 
 The rules are the plane's — B/S, hexagonal and isotropic, **without B0**: HashLife holds all of empty
-space as one shared node, and B0 would make it change. Every other rule is refused with that reason.
+space as one shared node, and B0 would make it change. Every other rule goes to the generic HashLife
+below, or is refused with the reason.
 
 Memory is bounded by a node limit (2^21 nodes). When a result is about to be computed and the table
 is full, the nodes still needed — those the root reaches, and those every result in progress holds,
@@ -81,8 +82,58 @@ them](https://golly.sourceforge.io/Help/formats.html#mc): the `[M2]` line, `#R` 
 generation, then the tree children first, a leaf as 8 rows of `.` and `*` each ended by `$`, a node as
 `level nw ne sw se` numbering the lines before it from 1, `0` the empty node, the last line the root,
 whose south-east child's north-west cell is (0, 1). `--pattern <file.mc>` runs one under HashLife,
-fitted to the view. Multi-state files (leaves `1 a b c d`), forward references, children of the wrong
-size and rules HashLife cannot run are refused with a diagnostic at the offending text.
+fitted to the view. Forward references, children of the wrong size and rules HashLife cannot run are
+refused with a diagnostic at the offending text.
+
+### HashLife for every state
+
+Every other rule whose next state depends only on a cell and the cells touching it runs under a
+**generic HashLife** (`hashlife_multi.sysl`), Golly's `ghashbase` in this program's terms; `--hashlife`
+and `h` choose it by themselves for a rule the plane cannot run, and the bit-packed one stays the one
+for B/S and isotropic rules, being faster. Its leaves are **4×4 cells, a byte apiece**: sixteen bytes,
+two words, looked up as a pair. Golly's are 2×2; four times the cells to a leaf is a quarter of the
+nodes for the same key size, where an 8×8 leaf's key would be eight words. A level-3 node's result —
+its centre 4×4, two generations on — is the **rule's own step**: a rule table's `lookup` cell by cell,
+and for every other rule `Grid.step` on an 8×8 scratch grid with dead edges, so a rule plugs in by
+being one the grid runs. Everything above that — the nine-and-four recursion, step sizes, centring,
+the node limit, sweeps and pins — is the two-state universe's.
+
+It takes:
+
+- **rule tables and trees** (`.rule` @TABLE/@TREE, Moore, von Neumann and hexagonal): WireWorld,
+  QuadLife, Immigration, Langton's ant and the turmites;
+- **Generations**, Moore, lettered and hexagonal;
+- MCell's **cyclic and Greenberg–Hastings rules at range 1**, **Vote for Life**, **Weighted Life**,
+  and **Larger than Life at range 1**;
+- B/S rules too (the tests run Life on it against the bit-packed universe).
+
+It refuses, saying why: any rule that brings a cell to life from an **all-empty neighbourhood** —
+found by stepping the rule itself on an empty square, whatever its kind, since empty space is one
+shared node; **range 2 or more** (Larger than Life, cyclic); **Margolus** rules, whose blocks move
+between even and odd cells every generation, so a square's future depends on where and when it is;
+and the **1-D rules** (Wolfram's and MCell's), whose grid holds the line's history a row a generation
+and scrolls it — Golly runs `W` rules hashed by turning them into a 2-D rule whose rows never change
+once written, but the unbounded picture that makes is not the scrolling one shown here.
+
+The board draws the window under it flattened into a grid of states, in the rule's own colours, as
+the grid is drawn. `h` turns it off onto a torus with every state; a new rule leaves it for the torus.
+Langton's ant reaches generation 2^20 — the highway 20 000 cells long, 120 554 black cells — in one
+step: the whole `--shot` run, frame drawn, takes 0.09 s, and to 2^30 (124 million cells) 0.08 s.
+
+**Multi-state macrocell files** are read and written as Golly documents them: a leaf is a 2×2 square,
+`1 nw ne sw se` its four states, and every other node `level nw ne sw se` from level 2 up; a 4×4 leaf
+here is a level-2 node over up to four of them, each 2×2 written once. The `#R` line names the rule,
+read as `--rule` reads one — a rule file's name finds `<name>.rule` — and `--rule` or `--rule-file`
+may replace it if it has every state the cells use. The bundled `patterns/primes.mc` is Golly's
+WireWorld computer, which computes primes: read and written again, its tree comes back line for line.
+
+The tests run the generic universe beside the grid cell for cell at counts that are not powers of
+two — WireWorld, QuadLife and Immigration soups, Langton's ant, LLRR and another turmite, a tree
+walked and the same tree expanded, five Generations rules, MCell's families — and check Langton's
+ant against OEIS A255938 at 11 000 steps and, in one 2^20 step, against its highway: a(n + 104) =
+a(n) + 12 from n = 9977, two cells diagonally a period. They count the nodes of 4096 equal QuadLife
+blocks, run under node limits of 300 to 3000, round-trip macrocell files, refuse each kind of rule
+and file, and drive the viewer through it.
 
 The bundled `patterns/logarithmic-width.mc` is Golly's: Jason Summers and Gabriel Nivasch's pattern
 whose diameter grows logarithmically, with Dean Hickerson's analysis in its header.
@@ -454,7 +505,11 @@ The Golly Gang and free software under the GNU General Public License, version 2
 three files are distributed under those terms, not ISC. `patterns/logarithmic-width.mc` is Golly's
 own file too, unchanged (`Patterns/HashLife/Constructions/logarithmic-width.mc`), by Jason Summers
 and Gabriel Nivasch with Dean Hickerson's analysis, as its `#C` lines say, and is likewise distributed
-under the GNU General Public License, version 2 or later, not ISC. `rules/Immigration.rule` and
+under the GNU General Public License, version 2 or later, not ISC. `patterns/primes.mc` is Golly's
+own file as well, unchanged (`Patterns/WireWorld/primes.mc`): David Moore and Mark Owen's WireWorld
+computer, its program by Michael Fryers, copyright 1992 and 2008 by Moore and Owen as its `#C` lines
+say, and distributed here as Golly distributes it, under the GNU General Public License, version 2 or
+later, not ISC. `rules/Immigration.rule` and
 `rules/QuadLife.rule` are LifeWiki's (`Rule:Immigration` and `Rule:QuadLife` at conwaylife.com),
 unchanged but for a description naming their source; LifeWiki's content is available under the GNU
 Free Documentation License 1.2, and these two files are distributed under those terms, not ISC; the

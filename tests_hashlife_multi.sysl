@@ -1,0 +1,579 @@
+@tests
+
+// The generic HashLife, checked cell for cell against the grid's own step for every kind of rule it
+// takes, against what is known of Langton's ant far beyond where a grid can follow it, against its own
+// promises — equal regions are one node, the table stays under its limit — and its macrocell reader
+// and writer against Golly's own file and against each other; and every rule it refuses, with why.
+
+import sh.sysl.parsing.Diagnostic
+import sysl.buf.{Buf, buf}
+import sysl.math.max
+import sysl.rand.rng
+import sysl.text.from_utf8
+
+private val WIREWORLD = from_utf8(embed("rules/WireWorld.rule")).unwrap()
+private val LANGTON = from_utf8(embed("rules/Langtons-Ant.rule")).unwrap()
+private val LLRR = from_utf8(embed("rules/LangtonsAnt_LLRR.rule")).unwrap()
+private val TURMITE = from_utf8(embed("rules/Turmite_180121020081.rule")).unwrap()
+private val QUADLIFE = from_utf8(embed("rules/QuadLife.rule")).unwrap()
+private val IMMIGRATION = from_utf8(embed("rules/Immigration.rule")).unwrap()
+private val DIODES = from_utf8(embed("patterns/diodes.rle")).unwrap()
+private val ANT = from_utf8(embed("patterns/langtons-ant.rle")).unwrap()
+private val LLRR_ANT = from_utf8(embed("patterns/langtons-ant-llrr.rle")).unwrap()
+private val TURMITE_ANT = from_utf8(embed("patterns/turmite.rle")).unwrap()
+private val QUAD_SOUP = from_utf8(embed("patterns/quadlife-soup.rle")).unwrap()
+private val IMMIGRATION_SOUP = from_utf8(embed("patterns/immigration-soup.rle")).unwrap()
+// Golly's `Patterns/WireWorld/primes.mc`, unchanged.
+private val PRIMES = from_utf8(embed("patterns/primes.mc")).unwrap()
+
+private table_of(text: string) -> RuleTable = parse_rule_file(text).unwrap()
+
+private table(text: string) -> Rule = Table(table_of(text))
+
+// The same rule as a tree walked a neighbour at a time, its expanded table left out.
+private walked(text: string) -> Rule
+    val t = table_of(text)
+
+    Table(RuleTable(t.name, t.states, t.neighbourhood, buf(), t.colours, t.tree, t.root))
+
+private rule(text: string) -> Rule = parse_rule(text).unwrap()
+
+// `p` centred on a torus of `size`, which the tests make big enough that nothing wraps.
+private grid_of(p: Pattern, size: int) -> Grid
+    var g = grid(size, size, Torus)
+
+    p.stamp_centred(&g)
+    g
+
+// Does `u` hold exactly `g`'s cells, the grid's centre on the origin? The populations agree, so no cell
+// of `u` lies beyond the grid, and every cell of the grid is the same in `u`.
+private same(u: MultiUniverse, g: Grid, what: string)
+    val left = g.width / 2
+    val top = g.height / 2
+
+    assert_eq(u.population(), i64(g.population()), what)
+
+    for y in 0..<g.height
+        for x in 0..<g.width
+            if u.get(i64(x - left), i64(y - top)) != g.state(x, y)
+                panic(s"${what}: cell ${x - left}, ${y - top} is ${u.get(i64(x - left), i64(y - top))}, and the grid's is ${g.state(x, y)}")
+
+// Run `start` under `rule` on its grid and as a universe, comparing them at each of `checks`, which
+// ascend; the universe is advanced by the difference each time, so every step size is exercised.
+private agrees_with_grid(start: Grid, rule: Rule, checks: []const int) -> MultiUniverse
+    var g = start
+    var u = multi_universe_of_grid(rule, g, g.width / 2, g.height / 2).unwrap()
+    var at = 0
+
+    same(u, g, "generation 0")
+
+    for i in 0..<checks.len
+        val n = checks[i]
+
+        for t in at..<n
+            g.step(rule)
+
+        u.advance(i64(n - at))
+        at = n
+        assert_eq(u.generation, i64(n))
+        same(u, g, s"${rule.notation()} at generation ${n}")
+
+    u
+
+private val CHECKS = [1, 2, 3, 5, 8, 13, 64, 100, 257, 300]
+
+// A soup of `area` by `area` in the middle of a torus of `size`, each cell 0 to `states - 1`, about
+// `percent` in a hundred of them not 0.
+private soup(seed: int, size: int, area: int, states: int, percent: int) -> Grid
+    var r = rng(u64(seed), 7)
+    var g = grid(size, size, Torus)
+    val corner = (size - area) / 2
+
+    for y in 0..<area
+        for x in 0..<area
+            if int(r.below(100)) < percent then g.set_state(corner + x, corner + y, u8(1 + r.below(u64(states - 1))))
+
+    g
+
+// -- rule tables and trees ---------------------------------------------------------------------------
+
+@test("WireWorld's diodes run hashed as on the grid, cell for cell, at counts that are not powers of two")
+hlm_wireworld()
+    agrees_with_grid(grid_of(parse_rle(DIODES).unwrap(), 64), table(WIREWORLD), CHECKS)
+
+@test("QuadLife and Immigration soups run hashed as on the grid")
+hlm_colour_soups()
+    agrees_with_grid(grid_of(parse_rle(QUAD_SOUP).unwrap(), 256), table(QUADLIFE), CHECKS)
+    agrees_with_grid(grid_of(parse_rle(IMMIGRATION_SOUP).unwrap(), 256), table(IMMIGRATION), CHECKS)
+
+@test("the turmites run hashed as on the grid: LLRR and Golly's 180121020081")
+hlm_turmites()
+    agrees_with_grid(grid_of(parse_rle(LLRR_ANT).unwrap(), 128), table(LLRR), [1, 2, 7, 64, 100, 513, 1000, 2000])
+    agrees_with_grid(grid_of(parse_rle(TURMITE_ANT).unwrap(), 128), table(TURMITE), [1, 3, 64, 257, 1000])
+
+@test("a tree walked and the same tree expanded into a table both run hashed as on the grid")
+hlm_tree_and_table()
+    val checks = [1, 5, 31, 200, 999]
+
+    // A grid's buffers are shared by its copies, so each run starts from a grid of its own.
+    assert(table_of(LANGTON).next.len() > 0)
+    agrees_with_grid(grid_of(parse_rle(ANT).unwrap(), 96), table(LANGTON), checks)
+    agrees_with_grid(grid_of(parse_rle(ANT).unwrap(), 96), walked(LANGTON), checks)
+
+    // Only state 1 and 2 matter to WireWorld's tree as much as to its table: a soup of every state.
+    agrees_with_grid(soup(5, 96, 24, 4, 50), table(WIREWORLD), [1, 2, 9, 40])
+
+// -- Langton's ant -----------------------------------------------------------------------------------
+
+// The ant's cell and state in `u`, looked for in the square of `r` cells about `x`, `y`.
+private ant_near(u: MultiUniverse, x: i64, y: i64, r: i64) -> (i64, i64, int)
+    for dy in -r..r
+        for dx in -r..r
+            val s = int(u.get(x + dx, y + dy))
+
+            if s >= 2 then return (x + dx, y + dy, s)
+
+    panic(s"no ant within ${r} of ${x}, ${y}")
+
+// How many cells are black: every cell not 0, less the ant if it stands on white (states 2 to 5).
+private blacks(u: MultiUniverse, ant: int) -> i64 = u.population() - if ant <= 5 then 1 else 0
+
+// Langton (1986) and every account since: about 10,000 steps of chaos, then a highway of period 104,
+// each period moving the ant two cells diagonally, west and south, and adding 12 black cells. OEIS
+// A255938 counts the black cells: a(n + 104) = a(n) + 12 for n ≥ 9977, a(10032) = 722 and
+// a(11000) = 834 (https://oeis.org/A255938, its b-file).
+@test("Langton's ant runs hashed as on the grid to step 11000, where 834 cells are black as OEIS A255938 says")
+hlm_langton()
+    var g = grid_of(parse_rle(ANT).unwrap(), 160)
+    val u = agrees_with_grid(g, table(LANGTON), [1, 2, 3, 5, 13, 64, 100, 257, 1000, 3001, 5000, 9977, 10032, 11000])
+    val (_, _, s) = ant_near(u, 0, 0, 80)
+
+    assert_eq(blacks(u, s), 834)
+
+@test("Langton's ant jumps to step 2^20 in one step, its highway where the period says: 120554 black cells")
+hlm_langton_jump()
+    var near = multi_universe_of_grid(table(LANGTON), grid_of(parse_rle(ANT).unwrap(), 8), 4, 4).unwrap()
+
+    near.advance(10032)
+
+    val (x0, y0, s0) = ant_near(near, 0, 0, 80)
+
+    assert_eq(blacks(near, s0), 722)
+
+    // 2^20 = 10032 + 104 · 9986.
+    var far = multi_universe_of_grid(table(LANGTON), grid_of(parse_rle(ANT).unwrap(), 8), 4, 4).unwrap()
+
+    far.jump(20)
+    assert_eq(far.generation, i64(1) << 20)
+
+    val (x, y, s) = ant_near(far, x0 - 2 * 9986, y0 + 2 * 9986, 0)
+
+    assert_eq(s, s0)
+    assert_eq((x, y), (x0 - 2 * 9986, y0 + 2 * 9986))
+    assert_eq(blacks(far, s), i64(722 + 12 * 9986))
+    assert_eq(blacks(far, s), 120554)
+
+// -- Generations and MCell ---------------------------------------------------------------------------
+
+@test("Generations rules run hashed as on the grid: Brian's Brain, Star Wars, a lettered and a hexagonal one")
+hlm_generations()
+    // Brian's Brain's spaceships cross a cell a generation, so the torus is wider than they get.
+    val checks = [1, 2, 3, 5, 8, 13, 64, 100, 129]
+
+    agrees_with_grid(grid_of(parse_rle(BRIANS_BRAIN).unwrap(), 320), rule("/2/3"), checks)
+    agrees_with_grid(grid_of(parse_rle(STAR_WARS).unwrap(), 320), rule("345/2/4"), checks)
+
+    for (text, states) in [("/2/3", 3), ("345/2/4", 4), ("B2-a/S12/C5", 5), ("34/2/4H", 4), ("B2/S34/C3H", 3)]
+        agrees_with_grid(soup(3, 320, 24, states, 40), rule(text), checks)
+
+@test("MCell's radius-1 families run hashed as on the grid: cyclic, Greenberg–Hastings, Vote, Weighted, and Larger than Life at range 1")
+hlm_mcell()
+    val checks = [1, 2, 7, 31, 100]
+
+    // A cyclic rule's waves spread a cell a generation, as far as the torus lets them.
+    for (text, states) in [("R1/T3/C3/NM", 3), ("R1/T1/C4/NN", 4), ("R1/T1/C4/NM/GH", 4), ("R1/T2/C5/NN/GH", 5)]
+        agrees_with_grid(soup(9, 160, 32, states, 60), rule(text), [1, 2, 7, 31, 57])
+
+    agrees_with_grid(soup(4, 256, 24, 2, 45), rule("46789"), checks)
+
+    for (text, states) in [("NW1,NN2,NE1,WW1,ME0,EE1,SW1,SS1,SE1,HI0,RS2,RS3,RB3", 2),
+                           ("NW5,NN2,NE5,WW2,ME0,EE2,SW5,SS2,SE5,HI3,RS10,RS12,RS14,RS16,RB7,RB13", 3),
+                           ("NW1,NN1,NE0,WW1,ME0,EE1,SW0,SS1,SE1,HI5,RS2,RS4,RS5,RB2,RB3,RB4,RB5", 5)]
+        agrees_with_grid(soup(6, 256, 24, states, 45), rule(text), checks)
+
+    agrees_with_grid(soup(8, 256, 24, 2, 40), rule("R1,C0,M0,S2..3,B3..3,NM"), checks)
+    agrees_with_grid(soup(8, 256, 24, 4, 40), rule("R1,C4,M1,S2..4,B3..3,NN"), checks)
+
+@test("a two-state rule runs on the generic universe as on the bit-packed one")
+hlm_two_state()
+    val life = rule("B3/S23")
+    var g = grid(192, 192, Torus)
+
+    parse_rle(GOSPER_GUN).unwrap().stamp_centred(&g)
+    agrees_with_grid(g, life, [1, 30, 61, 200])
+
+// -- the universe's own promises ---------------------------------------------------------------------
+
+@test("a periodic multi-state field is a few nodes: 4096 equal QuadLife blocks, before and after a step")
+hlm_sharing()
+    var u = multi_universe(table(QUADLIFE)).unwrap()
+    var cells: Buf[(i64, i64, u8)] = buf()
+
+    // A two-coloured block every 8 cells, 64 by 64 of them: a still life in QuadLife.
+    for j in 0..<64
+        for i in 0..<64
+            for (dx, dy, s) in [(0, 0, 2), (1, 0, 3), (0, 1, 3), (1, 1, 2)]
+                cells.push((i64(8 * i + 1 + dx), i64(8 * j + 1 + dy), u8(s)))
+
+    u.place(cells)
+    assert_eq(u.population(), 4 * 4096)
+
+    // Each level is one node of blocks, one empty node, and the levels above the field's own.
+    assert(u.node_count() < 40, s"${u.node_count()} nodes")
+
+    u.jump(3)
+    assert_eq(u.population(), 4 * 4096)
+    assert_eq(u.get(1, 1), 2)
+    assert_eq(u.get(8 * 63 + 2, 8 * 63 + 1), 3)
+    // The step's results add a few nodes a level; the field's 4096 blocks unshared would be 4096 leaves.
+    assert(u.node_count() < 400, s"${u.node_count()} nodes after a step")
+
+@test("under a small node limit the table is swept, again and again, and the run stays exact")
+hlm_node_limit()
+    val quad = table(QUADLIFE)
+    var g = grid_of(parse_rle(QUAD_SOUP).unwrap(), 256)
+    var u = multi_universe_of_grid(quad, g, 128, 128).unwrap()
+
+    u.set_limit(3000)
+
+    for n in [1, 3, 17, 64, 100, 257, 300]
+        while u.generation < i64(n)
+            g.step(quad)
+            u.advance(1)
+            // Twice what a sweep kept, at most, and what one step makes past it.
+            assert(u.node_count() < 2 * 3000 + 2000, s"${u.node_count()} nodes at generation ${u.generation}")
+
+        same(u, g, s"generation ${n}")
+
+    assert(u.collections > 10, s"${u.collections} sweeps")
+
+@test("WireWorld's clocks run a generation at a time under 300 nodes, swept nearly every step")
+hlm_node_limit_clocks()
+    val wireworld = table(WIREWORLD)
+    var d = grid_of(parse_rle(DIODES).unwrap(), 64)
+    var w = multi_universe_of_grid(wireworld, d, 32, 32).unwrap()
+
+    w.set_limit(300)
+
+    for t in 0..<120
+        d.step(wireworld)
+        w.advance(1)
+        assert(w.node_count() < 1000, s"${w.node_count()} nodes")
+
+    same(w, d, "WireWorld under 300 nodes")
+    assert(w.collections > 20, s"${w.collections} sweeps")
+
+@test("one big step under a small node limit sweeps in the middle of a result and is still exact")
+hlm_node_limit_jump()
+    val quad = table(QUADLIFE)
+    var h = grid_of(parse_rle(QUAD_SOUP).unwrap(), 256)
+    var v = multi_universe_of_grid(quad, h, 128, 128).unwrap()
+
+    v.set_limit(2000)
+    v.jump(8)
+
+    for t in 0..<256
+        h.step(quad)
+
+    same(v, h, "one step of 256 under 2000 nodes")
+    assert(v.collections > 0)
+
+@test("the cell setter and getter agree, far from the origin and back to state 0")
+hlm_set()
+    var u = multi_universe(table(WIREWORLD)).unwrap()
+
+    u.set(5, -3, 3)
+    u.set(-1000, 7000, 2)
+    u.set(1 << 40, 0, 1)
+    assert_eq(u.get(5, -3), 3)
+    assert_eq(u.get(-1000, 7000), 2)
+    assert_eq(u.get(1 << 40, 0), 1)
+    assert_eq(u.get(6, -3), 0)
+    assert_eq(u.population(), 3)
+    assert_eq(u.bounds(), Some((-1000, -3, 1 << 40, 7000)))
+
+    u.set(-1000, 7000, 0)
+    assert_eq(u.population(), 2)
+
+@test("a window draws only its own cells onto a grid, at their states")
+hlm_window()
+    var u = multi_universe(table(QUADLIFE)).unwrap()
+
+    u.set(0, 0, 1)
+    u.set(3, 2, 4)
+    u.set(10, 10, 2)
+    u.set(-1, 0, 3)
+
+    var g = grid(4, 4, Bounded)
+
+    u.window_into(&g, 0, 0)
+    assert_eq(g.state(0, 0), 1)
+    assert_eq(g.state(3, 2), 4)
+    assert_eq(g.population(), 2)
+
+// -- refusals ----------------------------------------------------------------------------------------
+
+private refused_with(r: Rule, words: string)
+    multi_refusal(r) match
+        Some(why) -> assert(why.contains(words), why)
+        None -> panic(s"${r.notation()} was taken")
+
+    assert(multi_universe(r).is_err())
+
+@test("every rule the generic HashLife cannot run is refused, saying why")
+hlm_refusals()
+    // An empty neighbourhood that does not stay empty, whatever the kind.
+    for text in ["B03/S23", "B0/S6H", "/03/3", "0123", "R1,C0,M0,S2..3,B0..3,NM",
+                 "NW1,NN1,NE1,WW1,ME0,EE1,SW1,SS1,SE1,HI0,RB0,RB3,RS2"]
+        refused_with(rule(text), "all-empty neighbourhood")
+
+    refused_with(Table(parse_rule_file("@RULE Spark\n@TABLE\nn_states:2\nneighborhood:vonNeumann\nsymmetries:none\n0,0,0,0,0,1\n").unwrap()), "all-empty")
+
+    // Further than the cells touching a cell.
+    refused_with(rule("R2,C0,M1,S2..5,B3..4,NM"), "looks 2 cells away")
+    refused_with(rule("R3/T5/C8/NM/GH"), "looks 3 cells away")
+
+    // A phase that alternates, and the 1-D rules' history.
+    refused_with(rule("MS,D0;8;4;3;2;5;9;7;1;6;10;11;12;13;14;15"), "Margolus")
+    refused_with(rule("W110"), "1-D rule")
+    refused_with(rule("R2,WBF8A5CD8,H3"), "1-D rule")
+    refused_with(rule("R1,C0,M1,B1"), "1-D rule")
+
+    // The two universes between them: a B/S rule with B0 is refused as the bit-packed one says.
+    assert(any_hashlife_refusal(rule("B3/S23")).is_none())
+    assert(any_hashlife_refusal(table(WIREWORLD)).is_none())
+    assert(any_hashlife_refusal(rule("B03/S23")).unwrap().contains("has B0"))
+    assert(any_hashlife_refusal(rule("W110")).unwrap().contains("1-D rule"))
+
+// -- macrocell files ---------------------------------------------------------------------------------
+
+// Resolves only the rule files the tests name.
+private by_name(name: string) -> Result[Rule, string]
+    if name == "WireWorld" then return Ok(table(WIREWORLD))
+
+    if name == "QuadLife" then return Ok(table(QUADLIFE))
+
+    if name == "LangtonsAnt_LLRR" then return Ok(table(LLRR))
+
+    parse_rule(name).map_err(d -> d.message)
+
+private read(text: string) -> MultiUniverse = parse_multi_mc(text, n -> by_name(n)).unwrap()
+
+private refused(text: string) -> Diagnostic =
+    parse_multi_mc(text, n -> by_name(n)) match
+        Ok(_) -> panic(s"read: ${text}")
+        Err(d) -> d
+
+private refused_at(text: string, at: string, words: string)
+    val d = refused(text)
+
+    assert_eq(d.span.start, usize(text.index_of(at).unwrap()), d.message)
+    assert(d.message.contains(words), d.message)
+
+@test("a multi-state universe written as a macrocell file reads back the same, generation and rule too")
+hlm_mc_round_trip()
+    var u = agrees_with_grid(grid_of(parse_rle(QUAD_SOUP).unwrap(), 256), table(QUADLIFE), [77])
+    val text = u.write_mc()
+
+    assert(text.starts_with("[M2] (automata)\n#R QuadLife\n#G 77\n"), text)
+    assert(is_multi_mc(text))
+
+    val back = read(text)
+
+    assert_eq(back.generation, 77)
+    assert(back.rule.same(u.rule))
+    assert_eq(back.population(), u.population())
+    assert_eq(back.write_mc(), text)
+
+    for y in -60..60
+        for x in -60..60
+            assert_eq(back.get(i64(x), i64(y)), u.get(i64(x), i64(y)))
+
+@test("a multi-state macrocell file is written as Golly writes one: 2×2 leaves, each once, children first")
+hlm_mc_numbering()
+    var u = multi_universe(table(WIREWORLD)).unwrap()
+
+    // The root is level 3, its south-east child's north-west cell at 0, 1.
+    u.set(0, 1, 1)
+    u.set(1, 1, 3)
+    u.set(-1, 0, 1)
+
+    val text = u.write_mc()
+
+    assert_eq(text, "[M2] (automata)\n#R WireWorld\n1 0 0 0 1\n2 0 0 0 1\n1 1 3 0 0\n2 3 0 0 0\n3 2 0 0 4\n")
+
+    // Golly's smallest file: a lone level-1 root, whose south-east cell is at 0, 1.
+    val tiny = read("[M2] (golly 2.0)\n#R WireWorld\n1 0 2 0 3\n")
+
+    assert_eq(tiny.population(), 2)
+    assert_eq(tiny.get(0, 0), 2)
+    assert_eq(tiny.get(0, 1), 3)
+
+// A macrocell file's tree: every line after the header and comments.
+private tree_of(text: string) -> string
+    var out = ""
+    var start: usize = 0
+
+    while start < text.len
+        val end = start + text[start..<text.len].index_of("\n").unwrap_or(text.len - start)
+        val line = text[start..<end]
+
+        if !line.starts_with("#") && !line.starts_with("[M2]") then out = out + line + "\n"
+
+        start = end + 1
+
+    out
+
+@test("Golly's primes.mc, a WireWorld computer, reads and runs hashed as on the grid")
+hlm_mc_golly()
+    assert(is_multi_mc(PRIMES))
+
+    val u = read(PRIMES)
+
+    assert_eq(u.rule.notation(), "WireWorld")
+
+    // Written again, the tree is Golly's own, line for line: the same nodes in the same order.
+    assert_eq(tree_of(u.write_mc()), tree_of(PRIMES))
+
+    val (west, north, east, south) = u.bounds().unwrap()
+    val size = int(max(max(-west, east), max(-north, south))) * 2 + 8
+    var g = grid(size, size, Torus)
+
+    u.window_into(&g, i64(-size / 2), i64(-size / 2))
+    assert_eq(i64(g.population()), u.population())
+    agrees_with_grid(g, u.rule, [1, 2, 5, 12])
+
+@test("malformed multi-state macrocell files are refused at the offending text")
+hlm_mc_errors()
+    refused_at("[M2]\n1 0 1 0 0\n", "1 0 1", "names its rule on a `#R` line")
+    refused_at("[M2]\n#R WireWorld\n1 0 4 0 0\n", "4 0 0", "not a state of WireWorld")
+    refused_at("[M2]\n#R WireWorld\n1 0 1 0\n", "1 0 1", "five numbers")
+    refused_at("[M2]\n#R WireWorld\n1 0 1 0 0\n2 1 2 0 0\n", "2 0 0", "not defined yet")
+    refused_at("[M2]\n#R WireWorld\n1 0 1 0 0\n3 1 0 0 0\n", "1 0 0 0\n", "node 1 is level 1")
+    refused_at("[M2]\n#R WireWorld\nhello\n", "hello", "node line")
+    refused_at("[M2]\n#R W110\n", "W110", "1-D rule")
+    refused_at("[M2]\n#R NoSuchRule\n", "NoSuchRule", "")
+    refused_at("#R WireWorld\n", "#R", "begins with `[M2]`")
+
+// -- the viewer --------------------------------------------------------------------------------------
+
+private model_with(args: []string) -> &Model = model_of(options(args).unwrap(), "automata").unwrap()
+
+private refusal(args: []string) -> string = model_of(options(args).unwrap(), "automata").unwrap_err()
+
+@test("--hashlife runs a multi-state rule under the generic HashLife as the grid runs it, a generation or 2^j at a time")
+hlm_model_runs()
+    val plain = model_with(["automata", "--pattern", "patterns/diodes.rle"])
+    val fast = model_with(["automata", "--pattern", "patterns/diodes.rle", "--hashlife"])
+
+    assert(fast.multi_on())
+    assert(!plain.hashlife_on())
+    assert_eq(fast.message.read(), plain.message.read())
+
+    for n in [1, 7, 100]
+        plain.advance(n)
+        fast.advance(n)
+        assert_eq(fast.generation.read(), plain.generation.read())
+        same(fast.hashed, plain.grid, s"generation ${plain.generation.read()}")
+
+    assert(status(fast).contains("HashLife 2^0"), status(fast))
+    assert(status(fast).contains(s"pop ${plain.grid.population()}"), status(fast))
+
+    val ant = model_with(["automata", "--pattern", "patterns/langtons-ant.rle"])
+    val jumping = model_with(["automata", "--pattern", "patterns/langtons-ant.rle", "--hashlife", "--step", "5"])
+
+    jumping.advance(3)
+    ant.advance(96)
+    assert_eq(jumping.generation.read(), 96)
+    same(jumping.hashed, ant.grid, "the ant at 96")
+
+@test("under the generic HashLife a tap edits the universe, and the sheet shows the window's states")
+hlm_model_toggle()
+    val m = model_with(["automata", "--pattern", "patterns/quadlife-soup.rle", "--hashlife"])
+    val before = m.hashed.population()
+
+    m.toggle(5000, -7000)
+    assert_eq(m.hashed.get(5000, -7000), 1)
+    assert_eq(m.hashed.population(), before + 1)
+
+    m.show(4990, -7010, 20, 30)
+    assert_eq((m.sheet.width, m.sheet.height), (20, 30))
+    assert_eq(m.sheet.state(10, 10), 1)
+    assert_eq(m.sheet.population(), 1)
+    assert_eq(m.plane.population(), 0)
+
+    m.toggle(5000, -7000)
+    assert_eq(m.hashed.population(), before)
+    m.show(4990, -7010, 20, 30)
+    assert_eq(m.sheet.population(), 0)
+
+    // The soup's own cells, each in its colour.
+    m.show(-12, -12, 24, 24)
+    assert_eq(i64(m.sheet.population()), before)
+
+    for y in 0..<24
+        for x in 0..<24
+            assert_eq(m.sheet.state(x, y), m.hashed.get(i64(x - 12), i64(y - 12)))
+
+@test("the generic HashLife turns off onto a torus with every state, turns on again from it, and leaves for a new rule")
+hlm_model_switch()
+    val m = model_with(["automata", "--pattern", "patterns/langtons-ant.rle", "--hashlife"])
+    val plain = model_with(["automata", "--pattern", "patterns/langtons-ant.rle"])
+
+    m.advance(500)
+    plain.advance(500)
+    m.use_hashlife(false)
+    assert(!m.hashlife_on())
+    assert(m.grid.edges == Torus)
+    assert(m.grid.same_cells(plain.grid))
+    assert(m.message.read().contains("HashLife off"), m.message.read())
+
+    m.use_hashlife(true)
+    assert(m.multi_on())
+    m.advance(500)
+    plain.advance(500)
+    same(m.hashed, plain.grid, "the ant at 1000, HashLife off and on")
+
+    // A new rule leaves it for a torus; the B/S notation's own HashLife needs the plane.
+    m.use_rule("B3/S23")
+    assert(!m.hashlife_on())
+    assert(!m.multi)
+    assert(m.message.read().contains("HashLife off"), m.message.read())
+
+    // A rule neither HashLife runs says why, and stays on the grid.
+    val bbm = model_with(["automata", "--pattern", "patterns/bbm.mcl"])
+
+    bbm.use_hashlife(true)
+    assert(!bbm.hashlife_on())
+    assert(bbm.message.read().contains("Margolus"), bbm.message.read())
+
+    assert(refusal(["automata", "--pattern", "patterns/bbm.mcl", "--hashlife"]).contains("Margolus"))
+    assert(refusal(["automata", "--pattern", "patterns/diodes.rle", "--hashlife", "--torus"]).contains("unbounded plane"))
+    assert(refusal(["automata", "--pattern", "5", "--rule", "B03/S23", "--hashlife"]).contains("has B0"))
+
+@test("a multi-state macrocell file runs under the generic HashLife under its own rule file, or the one given")
+hlm_model_macrocell()
+    val m = model_with(["automata", "--pattern", "patterns/primes.mc"])
+
+    assert(m.multi_on())
+    assert_eq(m.hashed.population(), 62037)
+    assert_eq(m.rule.notation(), "WireWorld")
+    assert(status(m).contains("pop 62037"), status(m))
+
+    val given = model_with(["automata", "--pattern", "patterns/primes.mc", "--rule-file", "rules/WireWorld.rule"])
+
+    assert_eq(given.hashed.population(), 62037)
+
+    assert(refusal(["automata", "--pattern", "patterns/primes.mc", "--rule", "B3/S23"]).contains("state 3"))
+    assert(refusal(["automata", "--pattern", "patterns/primes.mc", "--rule", "W110"]).contains("1-D rule"))
+    assert(refusal(["automata", "--pattern", "patterns/primes.mc", "--torus"]).contains("unbounded universe"))
