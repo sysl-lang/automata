@@ -15,7 +15,7 @@
 package {
   name    = "automata"
   version = "0.1.0"
-  sysl    = "0.7.3"
+  sysl    = "0.7.7"
 }
 
 optimization = "2"
@@ -32,5 +32,5 @@ requires {
 // PlutoVG through it.
 dependencies {
   parsing    { git = "github.com/sysl-lang/parsing",    version = "0.13.2" }
-  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.7" }
+  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.8" }
 }
