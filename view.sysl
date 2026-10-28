@@ -107,6 +107,23 @@ struct Model
 
         self.generation.set(self.generation.read() + i64(n))
 
+    // `n` steps, as `advance` takes them, but under HashLife as one jump for each binary digit of the
+    // `n` · 2^`step_log` generations they make: a million steps of one generation are seven jumps, the
+    // biggest 2^19, where `advance` takes a million steps. It is for one long run, such as the frames a
+    // shot is drawn after. Each jump of another size forgets the results kept at the last one, so a
+    // run made of many short calls is quicker through `advance`, whose steps are all one size.
+    advance_at_once(*self, n: int)
+        val generations = i64(n) << i64(self.step_log)
+
+        if !self.on_plane || !self.hashlife || generations >> i64(MOST_STEP + 1) != 0
+            self.advance(n)
+            return
+
+        if self.multi then self.hashed.advance(generations) else self.universe.advance(generations)
+
+        self.shown = false
+        self.generation.set(self.generation.read() + generations)
+
     // `n` of HashLife's steps.
     private advance_hashlife(*self, n: int)
         if self.multi

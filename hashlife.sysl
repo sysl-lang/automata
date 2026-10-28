@@ -93,6 +93,8 @@ struct Universe
     due: int
     // How many sweeps there have been.
     collections: int
+    // How many results have been worked out rather than found kept: the measure of a run's work.
+    worked: i64
     // Slots swept, handed out again before the table grows.
     free: Buf[int]
     // The nodes the results in progress hold that the root may not reach.
@@ -430,6 +432,7 @@ struct Universe
         val depth = self.pins.len()
 
         self.pins.push(n)
+        self.worked += 1
 
         if self.node_count() >= self.due then self.sweep()
 
@@ -644,7 +647,7 @@ live_cells(p: Plane) -> Buf[(i64, i64)]
 
 // An empty universe under `rule`, which is not checked.
 private fresh(rule: Rule) -> Universe
-    var u = Universe(rule, buf(), map(), map(), buf(), 0, 0, 0, NODE_LIMIT, NODE_LIMIT, 0, buf(), buf())
+    var u = Universe(rule, buf(), map(), map(), buf(), 0, 0, 0, NODE_LIMIT, NODE_LIMIT, 0, 0, buf(), buf())
 
     u.root = u.empty(LEAF + 1)
     u

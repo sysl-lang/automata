@@ -532,6 +532,29 @@ hashlife_model_step()
     assert(options(["automata", "--step", "41"]).unwrap_err().contains("2^0 to 2^40"))
     assert(options(["automata", "--step", "x"]).unwrap_err().contains("not a number"))
 
+@test("a shot's run under HashLife is a jump a binary digit, landing where single steps do for a quarter of the work")
+hashlife_model_at_once()
+    val plain = model_with(["automata", "--pattern", "4"])
+    val stepped = model_with(["automata", "--pattern", "4", "--hashlife"])
+    val fast = model_with(["automata", "--pattern", "4", "--hashlife"])
+
+    plain.advance_at_once(1000)
+    stepped.advance(1000)
+    fast.advance_at_once(1000)
+    assert_eq(plain.generation.read(), 1000)
+    assert_eq(fast.generation.read(), 1000)
+    same(fast.universe, plain.plane, "the gun at 1000")
+    same(stepped.universe, plain.plane, "the gun at 1000, a generation at a time")
+    assert(fast.universe.worked * 4 < stepped.universe.worked,
+           s"${fast.universe.worked} results worked out at once, ${stepped.universe.worked} a generation at a time")
+
+    // A run too long for one jump a digit, 2^17 steps of 2^40, is taken a step at a time.
+    val far = model_with(["automata", "--pattern", "1", "--hashlife", "--step", "40"])
+
+    far.advance_at_once(1 << 17)
+    assert_eq(far.generation.read(), i64(1) << 57)
+    assert_eq(far.universe.population(), 5)
+
 @test("under HashLife a tap edits the universe, and the board shows the universe's cells under it")
 hashlife_model_toggle()
     val m = model_with(["automata", "--pattern", "1", "--hashlife"])

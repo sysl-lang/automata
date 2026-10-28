@@ -497,6 +497,50 @@ hlm_model_runs()
     assert_eq(jumping.generation.read(), 96)
     same(jumping.hashed, ant.grid, "the ant at 96")
 
+// Do `a` and `b` hold the same cells? Their boxes agree, so every cell in either lies inside that box.
+private same_universes(a: MultiUniverse, b: MultiUniverse, what: string)
+    assert_eq(a.population(), b.population(), what)
+    assert_eq(a.bounds(), b.bounds(), what)
+
+    if a.bounds() is Some((west, north, east, south))
+        for y in north..south
+            for x in west..east
+                if a.get(x, y) != b.get(x, y) then panic(s"${what}: cell ${x}, ${y} is ${a.get(x, y)} and ${b.get(x, y)}")
+
+@test("a shot's two million generations of primes.mc are seven jumps, under three million results worked out, and land where steps of 2^7 do")
+hlm_model_at_once()
+    val m = model_with(["automata", "--pattern", "patterns/primes.mc"])
+
+    m.advance_at_once(2000000)
+    assert_eq(m.generation.read(), 2000000)
+    assert_eq(m.hashed.step_log, 0)
+    // A generation at a time it is some 300 results a generation, 600 million in all.
+    assert(m.hashed.worked < 3000000, s"${m.hashed.worked} results worked out")
+    assert(status(m).contains("gen 2000000"), status(m))
+
+    val stepped = model_with(["automata", "--pattern", "patterns/primes.mc", "--step", "7"])
+
+    stepped.advance(15625)
+    assert_eq(stepped.generation.read(), 2000000)
+    same_universes(m.hashed, stepped.hashed, "primes.mc at 2,000,000")
+
+    // A step size of its own is kept, and counts in the generations; the grid takes the same steps.
+    val ant = model_with(["automata", "--pattern", "patterns/langtons-ant.rle"])
+    val jumping = model_with(["automata", "--pattern", "patterns/langtons-ant.rle", "--hashlife", "--step", "5"])
+
+    jumping.advance_at_once(3)
+    ant.advance_at_once(96)
+    assert_eq(jumping.generation.read(), 96)
+    assert_eq(ant.generation.read(), 96)
+    same(jumping.hashed, ant.grid, "the ant at 96")
+    jumping.advance(1)
+    ant.advance(32)
+    same(jumping.hashed, ant.grid, "the ant at 128, a step after the jumps")
+
+    // Nothing at all is no generations.
+    jumping.advance_at_once(0)
+    assert_eq(jumping.generation.read(), 128)
+
 @test("under the generic HashLife a tap edits the universe, and the sheet shows the window's states")
 hlm_model_toggle()
     val m = model_with(["automata", "--pattern", "patterns/quadlife-soup.rle", "--hashlife"])

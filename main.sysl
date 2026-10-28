@@ -21,7 +21,9 @@
 //
 // `--shot` draws one frame with no window at all, after running the pattern for a fixed number of
 // generations, and writes it to a PNG: syslUI rasterizes into a PlutoVG surface either way, and the
-// surface can write itself out, so the frame a person would see is one a machine can check.
+// surface can write itself out, so the frame a person would see is one a machine can check. Under
+// HashLife the run is a jump for each binary digit of its generations, so two million generations
+// are seven jumps, not two million steps.
 
 import sh.sysl.ui.{Rect, render, pluto_canvas, fraction}
 import sh.sysl.ui_sdl.{app, run, system_font}
@@ -60,7 +62,7 @@ main(args: []string) -> Result[unit, string]
         return run(app("automata", () -> screen(m), () -> GROUND, WIDTH, HEIGHT,
                        on_event = e -> shortcut(m, e), on_frame = dt -> tick(m, dt)))
 
-    m.advance(o.generations)
+    m.advance_at_once(o.generations)
 
     val font = system_font()
 

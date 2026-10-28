@@ -486,7 +486,9 @@ On the plane the status line gives the population and the box the live cells lie
 its north-west cell.
 
 `--shot <png>` opens no window: it runs the pattern for `--generations` (default 100), lays out and
-rasterizes one frame into a PlutoVG surface, and writes it out.
+rasterizes one frame into a PlutoVG surface, and writes it out. Under HashLife, where `--generations`
+counts steps of 2^`--step` generations, the run is taken as one jump for each binary digit of the
+generations it makes, so two million generations of `patterns/primes.mc` take under a second.
 
 ## Tests
 
