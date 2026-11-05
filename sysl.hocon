@@ -15,7 +15,7 @@
 package {
   name    = "automata"
   version = "0.1.0"
-  sysl    = "0.7.3"
+  sysl    = "0.9.0"
 }
 
 optimization = "2"
@@ -31,6 +31,6 @@ requires {
 // `parsing` reads RLE and rule notation; `syslui-sdl` is the viewer, and reaches syslUI, SDL3 and
 // PlutoVG through it.
 dependencies {
-  parsing    { git = "github.com/sysl-lang/parsing",    version = "0.13.2" }
-  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.7" }
+  parsing    { git = "github.com/sysl-lang/parsing",    version = "0.14.1" }
+  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.22" }
 }

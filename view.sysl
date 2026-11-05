@@ -497,7 +497,7 @@ impl View for Board
 
         // The first frame fits the whole grid in the board and centres it.
         if !m.placed
-            m.zoom = max(1.0, min(real(r.w) / real(g.width), real(r.h) / real(g.height)).floor())
+            m.zoom = (real(r.w) / real(g.width)).min(real(r.h) / real(g.height)).floor().max(1.0)
             m.ox = (real(r.w) - m.zoom * real(g.width)) / 2.0
             m.oy = (real(r.h) - m.zoom * real(g.height)) / 2.0
             m.placed = true
@@ -562,7 +562,7 @@ impl View for Board
 
         if wy != 0
             val (px, py) = c.pointer()
-            val next = clamp(z * (1.0 + real(wy) / 200.0), 0.25, 64.0)
+            val next = (z * (1.0 + real(wy) / 200.0)).clamp(0.25, 64.0)
             val cx = (real(px) - left) / z
             val cy = (real(py) - top) / z
 
@@ -583,7 +583,7 @@ private paint_plane(m: &Model, c: *Canvas, r: Rect)
     if !m.placed
         val g = m.grid
 
-        m.zoom = max(1.0, min(real(r.w) / real(g.width), real(r.h) / real(g.height)).floor())
+        m.zoom = (real(r.w) / real(g.width)).min(real(r.h) / real(g.height)).floor().max(1.0)
         m.ox = (real(r.w) - m.zoom * real(g.width)) / 2.0
         m.oy = (real(r.h) - m.zoom * real(g.height)) / 2.0
         m.cx = -i64(g.width / 2)
@@ -666,7 +666,7 @@ private paint_plane(m: &Model, c: *Canvas, r: Rect)
 
     if wy != 0
         val (px, py) = c.pointer()
-        val next = clamp(z * (1.0 + real(wy) / 200.0), 0.25, 64.0)
+        val next = (z * (1.0 + real(wy) / 200.0)).clamp(0.25, 64.0)
         val ax = (real(px) - left) / z
         val ay = (real(py) - top) / z
 
@@ -726,7 +726,7 @@ private fit_plane(m: &Model, r: Rect)
         Some((west, north, east, south)) ->
             val w = real(east - west + 1)
             val h = real(south - north + 1)
-            var z = clamp(min(real(r.w) / (w + 2.0), real(r.h) / (h + 2.0)), 0.25, 64.0)
+            var z = (real(r.w) / (w + 2.0)).min(real(r.h) / (h + 2.0)).clamp(0.25, 64.0)
 
             if z >= 1.0 then z = z.floor()
 
