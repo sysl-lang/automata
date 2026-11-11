@@ -33,7 +33,7 @@ private struct Builder
     seen: Map[string, int]
     // The variables fixed so far, in tree order: the neighbours, then the cell.
     vals: Buf[int]
-    f: &Fn([]int) -> int
+    f: &Fn([]const int) -> int
 
 // The node at `depth` under the variables already fixed, built once however often it recurs.
 private grow(b: *Builder, depth: int) -> int
@@ -56,7 +56,7 @@ private grow(b: *Builder, depth: int) -> int
             int(b.lines.len()) - 1
 
 // A @TREE section that answers as `f` does, `f` reading its variables in tree order.
-private tree_section(states: int, neighbours: int, f: &Fn([]int) -> int) -> string
+private tree_section(states: int, neighbours: int, f: &Fn([]const int) -> int) -> string
     var b = Builder(states, buf(), map(), buf_filled(usize(neighbours + 1), 0), f)
 
     grow(&b, neighbours + 1)
@@ -68,12 +68,12 @@ private tree_section(states: int, neighbours: int, f: &Fn([]int) -> int) -> stri
 
     out
 
-private built(states: int, neighbours: int, f: &Fn([]int) -> int) -> RuleTable =
+private built(states: int, neighbours: int, f: &Fn([]const int) -> int) -> RuleTable =
     rule_of(s"@RULE Built\n${tree_section(states, neighbours, f)}")
 
 // -- the rules ---------------------------------------------------------------------------------------
 
-private life(v: []int) -> int
+private life(v: []const int) -> int
     var n = 0
 
     for i in 0..<8
@@ -82,7 +82,7 @@ private life(v: []int) -> int
     if n == 3 || (v[8] == 1 && n == 2) then 1 else 0
 
 // Swirl, the Generations rule 23/34/8, as Generations rules are defined: only state 1 is counted.
-private swirl(v: []int) -> int
+private swirl(v: []const int) -> int
     var n = 0
 
     for i in 0..<8
@@ -98,7 +98,7 @@ private swirl(v: []int) -> int
         (c + 1) % 8
 
 // `v`, in tree order, rearranged as `RuleTable.lookup` takes it: the cell, then the ring.
-private as_table(v: []int, neighbours: int, hood: Neighbourhood) -> Buf[int]
+private as_table(v: []const int, neighbours: int, hood: Neighbourhood) -> Buf[int]
     val ring = hood.ring()
     val tree = offsets(neighbours)
     val out: Buf[int] = buf_filled(usize(neighbours + 1), 0)
@@ -116,7 +116,7 @@ private bs_life() -> Rule = parse_rule("B3/S23").unwrap()
 // -- the oracle --------------------------------------------------------------------------------------
 
 // One generation of `f` worked out cell by cell.
-private oracle(g: Grid, neighbours: int, f: &Fn([]int) -> int) -> Grid
+private oracle(g: Grid, neighbours: int, f: &Fn([]const int) -> int) -> Grid
     val ring = offsets(neighbours)
     var out = grid(g.width, g.height, g.edges)
     val vals: Buf[int] = buf_filled(usize(neighbours + 1), 0)
@@ -150,7 +150,7 @@ private random(r: *Rng, width: int, height: int, edges: Edges, states: int) -> G
     g
 
 // `t`, expanded and walked, against `f` over random grids of every shape on both edges.
-private agrees(t: RuleTable, neighbours: int, f: &Fn([]int) -> int, seed: u64, generations: int)
+private agrees(t: RuleTable, neighbours: int, f: &Fn([]const int) -> int, seed: u64, generations: int)
     val widths = [1, 2, 7, 64, 65]
     val heights = [1, 3, 17]
     var r = rng(seed, 9)
@@ -270,7 +270,7 @@ private copies(neighbours: int, at: [](int, int))
 
 @test("a three-state von Neumann tree that weighs each neighbour differently steps as its function does")
 tre_von_neumann()
-    val f = (v: []int) -> (v[4] + v[0] + 2 * v[1] + v[2] * v[3]) % 3
+    val f = (v: []const int) -> (v[4] + v[0] + 2 * v[1] + v[2] * v[3]) % 3
     val t = built(3, 4, f)
 
     assert(t.neighbourhood == VonNeumann)
@@ -282,7 +282,7 @@ tre_von_neumann()
 @test("WireWorld built as a tree from WireWorld.rule expands to the same table, and steps as it does")
 tre_wireworld()
     val table = rule_of(WIREWORLD_TABLE)
-    val f = (v: []int) -> int(table.lookup(as_table(v, 8, Moore).view()))
+    val f = (v: []const int) -> int(table.lookup(as_table(v, 8, Moore).view()))
     val t = built(4, 8, f)
 
     assert(t.next == table.next)

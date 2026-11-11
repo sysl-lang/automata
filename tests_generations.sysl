@@ -50,7 +50,7 @@ end naive
 
 // One Wolfram step of a line, a cell at a time: its west neighbour, itself and its east neighbour
 // make a number from 0 to 7, and the code's bit there is what it becomes.
-private naive_line(line: []u8, code: int, ring: bool) -> Buf[u8]
+private naive_line(line: []const u8, code: int, ring: bool) -> Buf[u8]
     val n = int(line.len)
     val out: Buf[u8] = buf()
 
