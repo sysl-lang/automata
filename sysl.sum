@@ -6,9 +6,12 @@ github.com/sysl-lang/png v0.2.3 sha256:dfca3904935431bf4a72eb3335971b4944ee02489
 github.com/sysl-lang/png v0.2.4 sha256:5cc0bad5b1aebba8e4a2c6a6a3523d9262843e21d45672a426826406ca1cb63b
 github.com/sysl-lang/sdl3 v0.3.24 sha256:ebc146f3729c58e3c8a1bdac7d4849d1f667f410eeb3027b1cd9cbb625540e98
 github.com/sysl-lang/sdl3 v0.3.25 sha256:a3b370f7b3919c82fbe71e69a9bd848a308c82c45c23cef9bdfe963d775f2405
+github.com/sysl-lang/sdl3 v0.3.27 sha256:009968ed7e555e168342590c9e34e1254f9338f03f736b1135da7a0fd8b8fd99
 github.com/sysl-lang/skitter v0.3.5 sha256:f388fefb6d53ff4c609b3bdd3e12466dc7bc7bfc89cd892bbf791d80fa121ab0
 github.com/sysl-lang/syslui v0.1.17 sha256:a568a11677ffa5d225cf8c6f7f6dc1551040c55bf564bd5059c7fea3250bf6ca
 github.com/sysl-lang/syslui v0.2.0 sha256:37904d72e5863e3c725659616aca73056fb3b7f7872e50f40df733367b4e4967
+github.com/sysl-lang/syslui v0.2.6 sha256:2e585e0bdf7228080bccdc3fdfe30a7375323611ff5149ac9a596d0e3eb5827c
 github.com/sysl-lang/syslui-sdl v0.2.22 sha256:f8678d9dc01e00ed711cbd1bd3e905172d06c09d36a13afae2015652058d4a24
 github.com/sysl-lang/syslui-sdl v0.2.25 sha256:ff797c848d165b90e37de22abcbf62de9d422b81f5f6f96b654a337f9be25007
+github.com/sysl-lang/syslui-sdl v0.2.33 sha256:8163a2a99be0036c921e1e7b288c38c29911ea7ff74a08ea869a67b6ff487bc0
 github.com/sysl-lang/toml v0.1.4 sha256:459fd45c4d0a721e67b2ecca417732f1a726bf38705d331e8d452fe4370a3683
